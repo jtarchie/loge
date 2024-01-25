@@ -17,8 +17,8 @@ import (
 
 type CLI struct {
 	Port       int `help:"start HTTP server on port" default:"3000" required:""`
-	Buckets    int `help:"number of buckets to fill into" required:"" default:"2"`
-	BucketSize int `help:"size of the bucket" required:"" default:"10000"`
+	Buckets    int `help:"number of buckets to fill into" required:"" default:"8"`
+	BucketSize int `help:"size of the bucket" required:"" default:"100000"`
 }
 
 func (c *CLI) Run() error {
@@ -52,11 +52,16 @@ func (c *CLI) Run() error {
 			defer client.Close()
 
 			client.Exec(`
+					CREATE TABLE labels (
+						id INTEGER PRIMARY KEY AUTOINCREMENT,
+						payload JSON
+					);
+
 					CREATE TABLE streams (
 						id INTEGER PRIMARY KEY AUTOINCREMENT,
 						timestamp INTEGER,
 						line TEXT,
-						labels JSON
+						label_id INTEGER
 					);
 				`)
 
@@ -74,9 +79,9 @@ func (c *CLI) Run() error {
 			}
 			defer transaction.Rollback()
 
-			insert, err := transaction.Prepare(`
+			insertStream, err := transaction.Prepare(`
 				INSERT INTO streams
-					(timestamp, line, labels)
+					(timestamp, line, label_id)
 						VALUES
 					(?, ?, ?);
 				`)
@@ -92,11 +97,41 @@ func (c *CLI) Run() error {
 				return
 			}
 
+			insertLabels, err := transaction.Prepare(`
+			INSERT INTO labels
+				(payload)
+					VALUES
+				(?);
+			`)
+		if err != nil {
+			slog.Error(
+				"could not prepare insert",
+				slog.String("error", err.Error()),
+				slog.String("filename", filename),
+			)
+
+			os.Exit(1)
+
+			return
+		}
+
 			for _, payload := range buckets[index-1] {
 				for _, stream := range payload.Streams {
-					labels := MarshalLabels(stream.Stream)
+					resultLabel, err := insertLabels.Exec(MarshalLabels(stream.Stream))
+					if err != nil {
+						slog.Error(
+							"could not insert",
+							slog.String("error", err.Error()),
+							slog.String("filename", filename),
+						)
+
+						os.Exit(1)
+					}
+
+					labelID, _ := resultLabel.LastInsertId()
+
 					for _, value := range stream.Values {
-						_, err := insert.Exec(value[0], value[1], labels)
+						_, err := insertStream.Exec(value[0], value[1], labelID)
 						if err != nil {
 							slog.Error(
 								"could not insert",
@@ -122,6 +157,9 @@ func (c *CLI) Run() error {
 			}
 
 			client.Exec(`
+				pragma journal_mode = delete; -- to be able to actually set page size
+				pragma page_size = 1024; -- trade off of number of requests that need to be made vs overhead. 
+
 				vacuum;
 				pragma optimize;
 			`)

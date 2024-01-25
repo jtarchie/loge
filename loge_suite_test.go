@@ -2,16 +2,20 @@ package loge_test
 
 import (
 	"fmt"
+	"math/rand"
 	"net/http"
 	"os/exec"
 	"strconv"
 	"testing"
+	"time"
 
 	"github.com/imroc/req/v3"
+	"github.com/jtarchie/loge"
 	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
 	"github.com/onsi/gomega/gexec"
 	"github.com/phayes/freeport"
+	"github.com/pioz/faker"
 )
 
 func TestLoge(t *testing.T) {
@@ -60,3 +64,29 @@ var _ = Describe("Running the application", func() {
 		}).Should(Equal(http.StatusOK))
 	})
 })
+
+func generatePayload() *loge.Payload {
+	payload := &loge.Payload{}
+
+	for i := 0; i < rand.Intn(10)+1; i++ {
+	payload := &loge.Payload{}
+	entry := loge.Entry{
+			Stream: loge.Stream{},
+		}
+
+		for i := 0; i < rand.Intn(10)+1; i++ {
+			entry.Stream[faker.Username()] = faker.Letters()
+		}
+
+		for i := 0; i < rand.Intn(10)+1; i++ {
+			entry.Values = append(entry.Values, loge.Value{
+				fmt.Sprint(time.Now().UnixNano()),
+				faker.Sentence(),
+			})
+		}
+
+		payload.Streams = append(payload.Streams, entry)
+	}
+
+	return payload
+}

@@ -2,9 +2,13 @@ package loge
 
 import (
 	"fmt"
+	"log/slog"
 	"net/http"
 
+	"github.com/labstack/echo/v4/middleware"
 	"github.com/labstack/echo/v4"
+	slogecho "github.com/samber/slog-echo"
+	
 )
 
 type CLI struct {
@@ -13,6 +17,8 @@ type CLI struct {
 
 func (c *CLI) Run() error {
 	router := echo.New()
+	router.Use(slogecho.New(slog.Default()))
+	router.Use(middleware.Recover())
 	router.HideBanner = true
 	router.JSONSerializer = DefaultJSONSerializer{}
 

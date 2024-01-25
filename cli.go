@@ -54,7 +54,7 @@ func (c *CLI) Run() error {
 			client.Exec(`
 					CREATE TABLE labels (
 						id INTEGER PRIMARY KEY AUTOINCREMENT,
-						payload JSON
+						payload JSONB
 					);
 
 					CREATE TABLE streams (

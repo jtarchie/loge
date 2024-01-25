@@ -62,6 +62,10 @@ var _ = Describe("Running the application", func() {
 			//nolint: wrapcheck
 			return response.StatusCode
 		}).Should(Equal(http.StatusOK))
+
+		// saves the file to the database
+
+		// can search the database via endpoint
 	})
 })
 

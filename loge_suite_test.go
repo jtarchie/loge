@@ -16,6 +16,7 @@ import (
 	"github.com/onsi/gomega/gexec"
 	"github.com/phayes/freeport"
 	"github.com/pioz/faker"
+	"github.com/vmihailenco/msgpack/v5"
 )
 
 func TestLoge(t *testing.T) {
@@ -42,7 +43,7 @@ var _ = Describe("Running the application", func() {
 		Expect(err).NotTo(HaveOccurred())
 	})
 
-	It("accept a payload", func() {
+	It("accepts a JSON payload", func() {
 		port, err := freeport.GetFreePort()
 		Expect(err).NotTo(HaveOccurred())
 
@@ -62,10 +63,32 @@ var _ = Describe("Running the application", func() {
 			//nolint: wrapcheck
 			return response.StatusCode
 		}).Should(Equal(http.StatusOK))
+	})
 
-		// saves the file to the database
+	It("accepts a MsgPack payload", func() {
+		port, err := freeport.GetFreePort()
+		Expect(err).NotTo(HaveOccurred())
 
-		// can search the database via endpoint
+		session := cli("--port", strconv.Itoa(port))
+		defer session.Kill()
+
+		payload := generatePayload()
+		
+		contents, err := msgpack.Marshal(payload)
+		Expect(err).NotTo(HaveOccurred())
+
+		client := req.C()
+
+		Eventually(func() int {
+			response, _ := client.R().
+				SetRetryCount(3).
+				SetContentType("application/msgpack").
+				SetBodyBytes(contents).
+				Put(fmt.Sprintf("http://localhost:%d/api/streams", port))
+
+			//nolint: wrapcheck
+			return response.StatusCode
+		}).Should(Equal(http.StatusOK))
 	})
 })
 

@@ -1,0 +1,9 @@
+{
+  "devDependencies": {
+    "@msgpack/msgpack": "^3.0.0-beta2",
+    "esbuild": "^0.20.0"
+  },
+  "scripts": {
+    "build": "npx esbuild benchmark/"
+  }
+}

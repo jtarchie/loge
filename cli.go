@@ -6,13 +6,16 @@ import (
 	"log/slog"
 	"net/http"
 	"os"
+	"strings"
 	"time"
 
+	"github.com/goccy/go-json"
 	"github.com/jtarchie/worker"
 	"github.com/labstack/echo/v4"
 	"github.com/labstack/echo/v4/middleware"
 	_ "github.com/mattn/go-sqlite3"
 	slogecho "github.com/samber/slog-echo"
+	"github.com/vmihailenco/msgpack/v5"
 )
 
 type CLI struct {
@@ -103,17 +106,17 @@ func (c *CLI) Run() error {
 					VALUES
 				(?);
 			`)
-		if err != nil {
-			slog.Error(
-				"could not prepare insert",
-				slog.String("error", err.Error()),
-				slog.String("filename", filename),
-			)
+			if err != nil {
+				slog.Error(
+					"could not prepare insert",
+					slog.String("error", err.Error()),
+					slog.String("filename", filename),
+				)
 
-			os.Exit(1)
+				os.Exit(1)
 
-			return
-		}
+				return
+			}
 
 			for _, payload := range buckets[index-1] {
 				for _, stream := range payload.Streams {
@@ -175,9 +178,20 @@ func (c *CLI) Run() error {
 	router.PUT("/api/streams", func(c echo.Context) error {
 		payload := &Payload{}
 
-		err := c.Bind(payload)
-		if err != nil {
-			return fmt.Errorf("could not read streams: %w", err)
+		contentType := c.Request().Header.Get(echo.HeaderContentType)
+		switch {
+		case strings.HasPrefix(contentType, "application/msgpack"):
+			err := msgpack.NewDecoder(c.Request().Body).Decode(payload)
+			if err != nil {
+				return fmt.Errorf("could not unmarshal msgpack: %w", err)
+			}
+		case strings.HasPrefix(contentType, "application/json"):
+			err := json.NewDecoder(c.Request().Body).Decode(payload)
+			if err != nil {
+				return fmt.Errorf("could not unmarshal json: %w", err)
+			}
+		default:
+			return fmt.Errorf("could not read streams")
 		}
 
 		bucketWorkers.Enqueue(payload)

@@ -15,7 +15,7 @@ import (
 	"github.com/labstack/echo/v4/middleware"
 	_ "github.com/mattn/go-sqlite3"
 	slogecho "github.com/samber/slog-echo"
-	"github.com/vmihailenco/msgpack/v5"
+	"github.com/tinylib/msgp/msgp"
 )
 
 type CLI struct {
@@ -181,7 +181,7 @@ func (c *CLI) Run() error {
 		contentType := c.Request().Header.Get(echo.HeaderContentType)
 		switch {
 		case strings.HasPrefix(contentType, "application/msgpack"):
-			err := msgpack.NewDecoder(c.Request().Body).Decode(payload)
+			err := msgp.Decode(c.Request().Body, payload)
 			if err != nil {
 				return fmt.Errorf("could not unmarshal msgpack: %w", err)
 			}

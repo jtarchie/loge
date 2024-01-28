@@ -14,6 +14,8 @@ require (
 	github.com/phayes/freeport v0.0.0-20220201140144-74d24b5ae9f5
 	github.com/pioz/faker v1.7.3
 	github.com/samber/slog-echo v1.12.1
+	github.com/tinylib/msgp v1.1.9
+	github.com/vmihailenco/msgpack/v5 v5.4.1
 )
 
 require (
@@ -36,10 +38,8 @@ require (
 	github.com/quic-go/quic-go v0.41.0 // indirect
 	github.com/refraction-networking/utls v1.6.1 // indirect
 	github.com/samber/lo v1.39.0 // indirect
-	github.com/tinylib/msgp v1.1.9 // indirect
 	github.com/valyala/bytebufferpool v1.0.0 // indirect
 	github.com/valyala/fasttemplate v1.2.2 // indirect
-	github.com/vmihailenco/msgpack/v5 v5.4.1 // indirect
 	github.com/vmihailenco/tagparser/v2 v2.0.0 // indirect
 	go.opentelemetry.io/otel v1.22.0 // indirect
 	go.opentelemetry.io/otel/trace v1.22.0 // indirect

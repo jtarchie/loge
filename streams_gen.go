@@ -613,7 +613,7 @@ func (z *Payload) DecodeMsg(dc *msgp.Reader) (err error) {
 			return
 		}
 		switch msgp.UnsafeString(field) {
-		case "stream":
+		case "streams":
 			err = z.Streams.DecodeMsg(dc)
 			if err != nil {
 				err = msgp.WrapError(err, "Streams")
@@ -633,8 +633,8 @@ func (z *Payload) DecodeMsg(dc *msgp.Reader) (err error) {
 // EncodeMsg implements msgp.Encodable
 func (z *Payload) EncodeMsg(en *msgp.Writer) (err error) {
 	// map header, size 1
-	// write "stream"
-	err = en.Append(0x81, 0xa6, 0x73, 0x74, 0x72, 0x65, 0x61, 0x6d)
+	// write "streams"
+	err = en.Append(0x81, 0xa7, 0x73, 0x74, 0x72, 0x65, 0x61, 0x6d, 0x73)
 	if err != nil {
 		return
 	}
@@ -650,8 +650,8 @@ func (z *Payload) EncodeMsg(en *msgp.Writer) (err error) {
 func (z *Payload) MarshalMsg(b []byte) (o []byte, err error) {
 	o = msgp.Require(b, z.Msgsize())
 	// map header, size 1
-	// string "stream"
-	o = append(o, 0x81, 0xa6, 0x73, 0x74, 0x72, 0x65, 0x61, 0x6d)
+	// string "streams"
+	o = append(o, 0x81, 0xa7, 0x73, 0x74, 0x72, 0x65, 0x61, 0x6d, 0x73)
 	o, err = z.Streams.MarshalMsg(o)
 	if err != nil {
 		err = msgp.WrapError(err, "Streams")
@@ -678,7 +678,7 @@ func (z *Payload) UnmarshalMsg(bts []byte) (o []byte, err error) {
 			return
 		}
 		switch msgp.UnsafeString(field) {
-		case "stream":
+		case "streams":
 			bts, err = z.Streams.UnmarshalMsg(bts)
 			if err != nil {
 				err = msgp.WrapError(err, "Streams")
@@ -698,7 +698,7 @@ func (z *Payload) UnmarshalMsg(bts []byte) (o []byte, err error) {
 
 // Msgsize returns an upper bound estimate of the number of bytes occupied by the serialized message
 func (z *Payload) Msgsize() (s int) {
-	s = 1 + 7 + z.Streams.Msgsize()
+	s = 1 + 8 + z.Streams.Msgsize()
 	return
 }
 

@@ -41,13 +41,13 @@ func (b Buckets) Append(index int, payload *Payload) error {
 }
 
 func NewBucket(
-	size int,
+	payloadSize int,
 	outputDir string,
 ) *Bucket {
 	return &Bucket{
 		outputDir:   outputDir,
-		payload:     make([]*Payload, 0, size),
-		payloadSize: size,
+		payload:     make([]*Payload, 0, payloadSize),
+		payloadSize: payloadSize,
 	}
 }
 
@@ -136,10 +136,13 @@ func (b *Bucket) flush() error {
 		return fmt.Errorf("could not commit transaction %q: %w", filename, err)
 	}
 
-	client.Exec(`
+	_, err = client.Exec(`
 		vacuum;
 		pragma optimize;
 	`)
+	if err != nil {
+		return fmt.Errorf("could not optimize %q: %w", filename, err)
+	}
 
 	b.payload = b.payload[:0]
 

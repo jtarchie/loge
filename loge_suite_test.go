@@ -1,22 +1,27 @@
 package loge_test
 
 import (
+	"bytes"
+	"database/sql"
 	"fmt"
 	"math/rand"
 	"net/http"
+	"os"
 	"os/exec"
+	"path/filepath"
 	"strconv"
 	"testing"
 	"time"
 
 	"github.com/imroc/req/v3"
 	"github.com/jtarchie/loge"
+	_ "github.com/mattn/go-sqlite3"
 	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
 	"github.com/onsi/gomega/gexec"
 	"github.com/phayes/freeport"
 	"github.com/pioz/faker"
-	"github.com/vmihailenco/msgpack/v5"
+	"github.com/tinylib/msgp/msgp"
 )
 
 func TestLoge(t *testing.T) {
@@ -44,17 +49,25 @@ var _ = Describe("Running the application", func() {
 	})
 
 	It("accepts a JSON payload", func() {
+		outputPath, err := os.MkdirTemp("", "")
+		Expect(err).NotTo(HaveOccurred())
+
 		port, err := freeport.GetFreePort()
 		Expect(err).NotTo(HaveOccurred())
 
-		session := cli("--port", strconv.Itoa(port))
+		session := cli(
+			"--port", strconv.Itoa(port),
+			"--buckets", "1",
+			"--payload-size", "1",
+			"--output-path", outputPath,
+		)
 		defer session.Kill()
 
 		payload := generatePayload()
 
 		client := req.C()
 
-		Eventually(func() int {
+		Consistently(func() int {
 			response, _ := client.R().
 				SetRetryCount(3).
 				SetBodyJsonMarshal(payload).
@@ -63,32 +76,85 @@ var _ = Describe("Running the application", func() {
 			//nolint: wrapcheck
 			return response.StatusCode
 		}).Should(Equal(http.StatusOK))
+
+		Eventually(func() int {
+			matches, _ := filepath.Glob(filepath.Join(outputPath, "*.sqlite"))
+			return len(matches)
+		}).Should(BeNumerically(">=", 1))
+
+		matches, err := filepath.Glob(filepath.Join(outputPath, "*.sqlite"))
+		Expect(err).NotTo(HaveOccurred())
+
+		sqliteFilename := matches[0]
+		db, err := sql.Open("sqlite3", sqliteFilename)
+		Expect(err).NotTo(HaveOccurred())
+
+		var count int
+
+		err = db.QueryRow("SELECT COUNT(*) FROM labels").Scan(&count)
+		Expect(err).NotTo(HaveOccurred())
+		Expect(count).To(BeNumerically(">=", 1))
+
+		err = db.QueryRow("SELECT COUNT(*) FROM streams").Scan(&count)
+		Expect(err).NotTo(HaveOccurred())
+		Expect(count).To(BeNumerically(">=", 1))
 	})
 
 	It("accepts a MsgPack payload", func() {
+		outputPath, err := os.MkdirTemp("", "")
+		Expect(err).NotTo(HaveOccurred())
+
 		port, err := freeport.GetFreePort()
 		Expect(err).NotTo(HaveOccurred())
 
-		session := cli("--port", strconv.Itoa(port))
+		session := cli(
+			"--port", strconv.Itoa(port),
+			"--buckets", "1",
+			"--payload-size", "1",
+			"--output-path", outputPath,
+		)
 		defer session.Kill()
 
 		payload := generatePayload()
-		
-		contents, err := msgpack.Marshal(payload)
+
+		contents := &bytes.Buffer{}
+		err = msgp.Encode(contents, payload)
 		Expect(err).NotTo(HaveOccurred())
 
 		client := req.C()
 
-		Eventually(func() int {
+		Consistently(func() int {
 			response, _ := client.R().
 				SetRetryCount(3).
 				SetContentType("application/msgpack").
-				SetBodyBytes(contents).
+				SetBodyBytes(contents.Bytes()).
 				Put(fmt.Sprintf("http://localhost:%d/api/streams", port))
 
 			//nolint: wrapcheck
 			return response.StatusCode
 		}).Should(Equal(http.StatusOK))
+
+		Eventually(func() int {
+			matches, _ := filepath.Glob(filepath.Join(outputPath, "*.sqlite"))
+			return len(matches)
+		}).Should(BeNumerically(">=", 1))
+
+		matches, err := filepath.Glob(filepath.Join(outputPath, "*.sqlite"))
+		Expect(err).NotTo(HaveOccurred())
+
+		sqliteFilename := matches[0]
+		db, err := sql.Open("sqlite3", sqliteFilename)
+		Expect(err).NotTo(HaveOccurred())
+
+		var count int
+
+		err = db.QueryRow("SELECT COUNT(*) FROM labels").Scan(&count)
+		Expect(err).NotTo(HaveOccurred())
+		Expect(count).To(BeNumerically(">=", 1))
+
+		err = db.QueryRow("SELECT COUNT(*) FROM streams").Scan(&count)
+		Expect(err).NotTo(HaveOccurred())
+		Expect(count).To(BeNumerically(">=", 1))
 	})
 })
 
@@ -96,8 +162,7 @@ func generatePayload() *loge.Payload {
 	payload := &loge.Payload{}
 
 	for i := 0; i < rand.Intn(10)+1; i++ {
-	payload := &loge.Payload{}
-	entry := loge.Entry{
+		entry := loge.Entry{
 			Stream: loge.Stream{},
 		}
 

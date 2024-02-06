@@ -23,6 +23,11 @@ type CLI struct {
 }
 
 func (c *CLI) Run() error {
+	err := os.MkdirAll(c.OutputPath, os.ModePerm)
+	if err != nil {
+		return fmt.Errorf("could not create directory: %w", err)
+	}
+
 	buckets := NewBuckets(c.Buckets, c.PayloadSize, c.OutputPath)
 
 	bucketWorkers := worker.New(c.PayloadSize, c.Buckets, func(index int, payload *Payload) {
@@ -43,12 +48,12 @@ func (c *CLI) Run() error {
 
 		contentType := c.Request().Header.Get(echo.HeaderContentType)
 		switch {
-		case strings.HasPrefix(contentType, "application/msgpack"):
+		case strings.Contains(contentType, "application/msgpack"):
 			err := msgp.Decode(c.Request().Body, payload)
 			if err != nil {
 				return fmt.Errorf("could not unmarshal msgpack: %w", err)
 			}
-		case strings.HasPrefix(contentType, "application/json"):
+		case strings.Contains(contentType, "application/json"):
 			err := json.NewDecoder(c.Request().Body).Decode(payload)
 			if err != nil {
 				return fmt.Errorf("could not unmarshal json: %w", err)

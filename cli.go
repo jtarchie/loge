@@ -16,10 +16,10 @@ import (
 )
 
 type CLI struct {
-	Port        int    `help:"start HTTP server on port" default:"3000" required:""`
-	Buckets     int    `help:"number of buckets to fill into" required:"" default:"8"`
-	PayloadSize int    `help:"size of the bucket payload" required:"" default:"10000"`
-	OutputPath  string `help:"output path for all the sqlite files" required:"" default:"tmp/"`
+	Port        int    `default:"3000"  help:"start HTTP server on port"            required:""`
+	Buckets     int    `default:"8"     help:"number of buckets to fill into"       required:""`
+	PayloadSize int    `default:"10000" help:"size of the bucket payload"           required:""`
+	OutputPath  string `default:"tmp/"  help:"output path for all the sqlite files" required:""`
 }
 
 func (c *CLI) Run() error {
@@ -43,18 +43,18 @@ func (c *CLI) Run() error {
 	router.HideBanner = true
 	router.JSONSerializer = DefaultJSONSerializer{}
 
-	router.PUT("/api/streams", func(c echo.Context) error {
+	router.PUT("/api/streams", func(echoContext echo.Context) error {
 		payload := &Payload{}
 
-		contentType := c.Request().Header.Get(echo.HeaderContentType)
+		contentType := echoContext.Request().Header.Get(echo.HeaderContentType)
 		switch {
 		case strings.Contains(contentType, "application/msgpack"):
-			err := msgp.Decode(c.Request().Body, payload)
+			err := msgp.Decode(echoContext.Request().Body, payload)
 			if err != nil {
 				return fmt.Errorf("could not unmarshal msgpack: %w", err)
 			}
 		case strings.Contains(contentType, "application/json"):
-			err := json.NewDecoder(c.Request().Body).Decode(payload)
+			err := json.NewDecoder(echoContext.Request().Body).Decode(payload)
 			if err != nil {
 				return fmt.Errorf("could not unmarshal json: %w", err)
 			}
@@ -64,7 +64,7 @@ func (c *CLI) Run() error {
 
 		bucketWorkers.Enqueue(payload)
 
-		return c.String(http.StatusOK, "")
+		return echoContext.String(http.StatusOK, "")
 	})
 
 	return router.Start(fmt.Sprintf(":%d", c.Port))

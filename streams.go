@@ -2,8 +2,10 @@ package loge
 
 type Stream map[string]string
 
-type Value [2]string
-type Values []Value
+type (
+	Value  [2]string
+	Values []Value
+)
 
 type Entry struct {
 	Stream Stream `json:"stream" msg:"stream"`

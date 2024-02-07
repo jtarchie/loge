@@ -14,13 +14,13 @@ import (
 	"time"
 
 	"github.com/imroc/req/v3"
+	"github.com/jaswdr/faker/v2"
 	"github.com/jtarchie/loge"
 	_ "github.com/mattn/go-sqlite3"
 	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
 	"github.com/onsi/gomega/gexec"
 	"github.com/phayes/freeport"
-	"github.com/pioz/faker"
 	"github.com/tinylib/msgp/msgp"
 )
 
@@ -44,7 +44,7 @@ var _ = Describe("Running the application", func() {
 	BeforeEach(func() {
 		var err error
 
-		path, err = gexec.Build("github.com/jtarchie/loge/loge", "--tags", "fts5")
+		path, err = gexec.Build("github.com/jtarchie/loge/loge", "--tags", "fts5", "-race")
 		Expect(err).NotTo(HaveOccurred())
 	})
 
@@ -65,20 +65,29 @@ var _ = Describe("Running the application", func() {
 
 		payload := generatePayload()
 
-		client := req.C()
+		httpClient := req.C()
 
-		Consistently(func() int {
-			response, _ := client.R().
+		Eventually(func() error {
+			_, err := httpClient.R().
 				SetRetryCount(3).
 				SetBodyJsonMarshal(payload).
 				Put(fmt.Sprintf("http://localhost:%d/api/streams", port))
 
-			//nolint: wrapcheck
+			return err
+		}).ShouldNot(HaveOccurred())
+
+		Consistently(func() int {
+			response, _ := httpClient.R().
+				SetRetryCount(3).
+				SetBodyJsonMarshal(payload).
+				Put(fmt.Sprintf("http://localhost:%d/api/streams", port))
+
 			return response.StatusCode
 		}).Should(Equal(http.StatusOK))
 
 		Eventually(func() int {
 			matches, _ := filepath.Glob(filepath.Join(outputPath, "*.sqlite"))
+
 			return len(matches)
 		}).Should(BeNumerically(">=", 1))
 
@@ -86,16 +95,16 @@ var _ = Describe("Running the application", func() {
 		Expect(err).NotTo(HaveOccurred())
 
 		sqliteFilename := matches[0]
-		db, err := sql.Open("sqlite3", sqliteFilename)
+		dbClient, err := sql.Open("sqlite3", sqliteFilename)
 		Expect(err).NotTo(HaveOccurred())
 
 		var count int
 
-		err = db.QueryRow("SELECT COUNT(*) FROM labels").Scan(&count)
+		err = dbClient.QueryRow("SELECT COUNT(*) FROM labels").Scan(&count)
 		Expect(err).NotTo(HaveOccurred())
 		Expect(count).To(BeNumerically(">=", 1))
 
-		err = db.QueryRow("SELECT COUNT(*) FROM streams").Scan(&count)
+		err = dbClient.QueryRow("SELECT COUNT(*) FROM streams").Scan(&count)
 		Expect(err).NotTo(HaveOccurred())
 		Expect(count).To(BeNumerically(">=", 1))
 	})
@@ -121,21 +130,30 @@ var _ = Describe("Running the application", func() {
 		err = msgp.Encode(contents, payload)
 		Expect(err).NotTo(HaveOccurred())
 
-		client := req.C()
+		httpClient := req.C()
+
+		Eventually(func() error {
+			_, err := httpClient.R().
+				SetRetryCount(3).
+				SetBodyJsonMarshal(payload).
+				Put(fmt.Sprintf("http://localhost:%d/api/streams", port))
+
+			return err
+		}).ShouldNot(HaveOccurred())
 
 		Consistently(func() int {
-			response, _ := client.R().
+			response, _ := httpClient.R().
 				SetRetryCount(3).
 				SetContentType("application/msgpack").
 				SetBodyBytes(contents.Bytes()).
 				Put(fmt.Sprintf("http://localhost:%d/api/streams", port))
 
-			//nolint: wrapcheck
 			return response.StatusCode
 		}).Should(Equal(http.StatusOK))
 
 		Eventually(func() int {
 			matches, _ := filepath.Glob(filepath.Join(outputPath, "*.sqlite"))
+
 			return len(matches)
 		}).Should(BeNumerically(">=", 1))
 
@@ -143,23 +161,25 @@ var _ = Describe("Running the application", func() {
 		Expect(err).NotTo(HaveOccurred())
 
 		sqliteFilename := matches[0]
-		db, err := sql.Open("sqlite3", sqliteFilename)
+		dbClient, err := sql.Open("sqlite3", sqliteFilename)
 		Expect(err).NotTo(HaveOccurred())
 
 		var count int
 
-		err = db.QueryRow("SELECT COUNT(*) FROM labels").Scan(&count)
+		err = dbClient.QueryRow("SELECT COUNT(*) FROM labels").Scan(&count)
 		Expect(err).NotTo(HaveOccurred())
 		Expect(count).To(BeNumerically(">=", 1))
 
-		err = db.QueryRow("SELECT COUNT(*) FROM streams").Scan(&count)
+		err = dbClient.QueryRow("SELECT COUNT(*) FROM streams").Scan(&count)
 		Expect(err).NotTo(HaveOccurred())
 		Expect(count).To(BeNumerically(">=", 1))
 	})
 })
 
+//nolint: gosec
 func generatePayload() *loge.Payload {
 	payload := &loge.Payload{}
+	fake := faker.New()
 
 	for i := 0; i < rand.Intn(10)+1; i++ {
 		entry := loge.Entry{
@@ -167,13 +187,13 @@ func generatePayload() *loge.Payload {
 		}
 
 		for i := 0; i < rand.Intn(10)+1; i++ {
-			entry.Stream[faker.Username()] = faker.Letters()
+			entry.Stream[fake.Person().Name()] = fake.Lorem().Text(100)
 		}
 
 		for i := 0; i < rand.Intn(10)+1; i++ {
 			entry.Values = append(entry.Values, loge.Value{
-				fmt.Sprint(time.Now().UnixNano()),
-				faker.Sentence(),
+				strconv.FormatInt(time.Now().UnixNano(), 10),
+				fake.Lorem().Sentence(10),
 			})
 		}
 

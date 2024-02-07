@@ -73,7 +73,7 @@ func (b *Bucket) flush() error {
 	}
 	defer client.Close()
 
-	client.Exec(`
+	_, err = client.Exec(`
 		CREATE TABLE labels (
 			id INTEGER PRIMARY KEY AUTOINCREMENT,
 			payload JSONB
@@ -86,12 +86,16 @@ func (b *Bucket) flush() error {
 			label_id INTEGER
 		);
 	`)
+	if err != nil {
+		return fmt.Errorf("could not create schema %q: %w", filename, err)
+	}
 
 	transaction, err := client.Begin()
 	if err != nil {
 		return fmt.Errorf("could not create transaction %q: %w", filename, err)
 	}
-	defer transaction.Rollback()
+
+	defer func() { _ = transaction.Rollback() }()
 
 	insertStream, err := transaction.Prepare(`
 		INSERT INTO streams
@@ -103,6 +107,8 @@ func (b *Bucket) flush() error {
 		return fmt.Errorf("could not prepare insert %q: %w", filename, err)
 	}
 
+	defer func() { _ = insertStream.Close() }()
+
 	insertLabels, err := transaction.Prepare(`
 		INSERT INTO labels
 			(payload)
@@ -112,6 +118,8 @@ func (b *Bucket) flush() error {
 	if err != nil {
 		return fmt.Errorf("could not prepare insert %q: %w", filename, err)
 	}
+
+	defer func() { _ = insertLabels.Close() }()
 
 	for _, payload := range b.payload {
 		for _, stream := range payload.Streams {

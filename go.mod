@@ -6,16 +6,15 @@ require (
 	github.com/alecthomas/kong v0.8.1
 	github.com/goccy/go-json v0.10.2
 	github.com/imroc/req/v3 v3.42.3
+	github.com/jaswdr/faker/v2 v2.0.3
 	github.com/jtarchie/worker v0.0.0-20240118034340-7685a4365343
 	github.com/labstack/echo/v4 v4.11.4
 	github.com/mattn/go-sqlite3 v1.14.20
 	github.com/onsi/ginkgo/v2 v2.15.0
 	github.com/onsi/gomega v1.31.1
 	github.com/phayes/freeport v0.0.0-20220201140144-74d24b5ae9f5
-	github.com/pioz/faker v1.7.3
 	github.com/samber/slog-echo v1.12.1
 	github.com/tinylib/msgp v1.1.9
-	github.com/vmihailenco/msgpack/v5 v5.4.1
 )
 
 require (
@@ -40,7 +39,6 @@ require (
 	github.com/samber/lo v1.39.0 // indirect
 	github.com/valyala/bytebufferpool v1.0.0 // indirect
 	github.com/valyala/fasttemplate v1.2.2 // indirect
-	github.com/vmihailenco/tagparser/v2 v2.0.0 // indirect
 	go.opentelemetry.io/otel v1.22.0 // indirect
 	go.opentelemetry.io/otel/trace v1.22.0 // indirect
 	go.uber.org/mock v0.4.0 // indirect

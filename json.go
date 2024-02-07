@@ -1,3 +1,4 @@
+//nolint: errorlint,varnamelen
 package loge
 
 import (

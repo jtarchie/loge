@@ -1,6 +1,7 @@
 package loge
 
 import (
+	"errors"
 	"fmt"
 	"log/slog"
 	"net/http"
@@ -47,6 +48,7 @@ func (c *CLI) Run() error {
 		payload := &Payload{}
 
 		contentType := echoContext.Request().Header.Get(echo.HeaderContentType)
+
 		switch {
 		case strings.Contains(contentType, "application/msgpack"):
 			err := msgp.Decode(echoContext.Request().Body, payload)
@@ -59,7 +61,7 @@ func (c *CLI) Run() error {
 				return fmt.Errorf("could not unmarshal json: %w", err)
 			}
 		default:
-			return fmt.Errorf("could not read streams")
+			return errors.New("could not read streams")
 		}
 
 		bucketWorkers.Enqueue(payload)

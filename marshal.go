@@ -23,6 +23,7 @@ func MarshalLabels(tags map[string]string) string {
 		if count < len(tags)-1 {
 			builder.WriteByte(',')
 		}
+
 		count++
 	}
 

@@ -7,19 +7,19 @@ import (
 	"math/rand"
 	"net/http"
 	"os"
-	"os/exec"
 	"path/filepath"
+	"runtime"
 	"strconv"
 	"testing"
 	"time"
 
+	"github.com/alecthomas/kong"
 	"github.com/imroc/req/v3"
 	"github.com/jaswdr/faker/v2"
 	"github.com/jtarchie/loge"
 	_ "github.com/mattn/go-sqlite3"
 	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
-	"github.com/onsi/gomega/gexec"
 	"github.com/phayes/freeport"
 	"github.com/tinylib/msgp/msgp"
 )
@@ -29,24 +29,48 @@ func TestLoge(t *testing.T) {
 	RunSpecs(t, "Loge Suite")
 }
 
+type cli struct{}
+
+func (c *cli) Kill() {}
+
 var _ = Describe("Running the application", func() {
-	var path string
+	// var path string
 
-	cli := func(args ...string) *gexec.Session {
-		command := exec.Command(path, args...)
+	// cli := func(args ...string) *gexec.Session {
+	// 	command := exec.Command(path, args...)
 
-		session, err := gexec.Start(command, GinkgoWriter, GinkgoWriter)
-		Expect(err).ToNot(HaveOccurred())
+	// 	session, err := gexec.Start(command, GinkgoWriter, GinkgoWriter)
+	// 	Expect(err).ToNot(HaveOccurred())
 
-		return session
+	// 	return session
+	// }
+
+	cli := func(args ...string) *cli {
+		command := &loge.CLI{}
+		parser, err := kong.New(command)
+		Expect(err).NotTo(HaveOccurred())
+
+		go func() {
+			defer GinkgoRecover()
+
+			ctx, err := parser.Parse(args)
+			Expect(err).NotTo(HaveOccurred())
+
+			err = ctx.Run()
+			Expect(err).NotTo(HaveOccurred())
+		}()
+
+		runtime.Gosched()
+
+		return &cli{}
 	}
 
-	BeforeEach(func() {
-		var err error
+	// BeforeEach(func() {
+	// 	var err error
 
-		path, err = gexec.Build("github.com/jtarchie/loge/loge", "--tags", "fts5", "-race")
-		Expect(err).NotTo(HaveOccurred())
-	})
+	// 	path, err = gexec.Build("github.com/jtarchie/loge/loge", "--tags", "fts5", "-race")
+	// 	Expect(err).NotTo(HaveOccurred())
+	// })
 
 	It("accepts a JSON payload", func() {
 		outputPath, err := os.MkdirTemp("", "")

@@ -35,7 +35,7 @@ func MarshalLabels(tags map[string]string) string {
 func marshalString(builder *strings.Builder, str string) {
 	builder.WriteByte('"')
 
-	for i := 0; i < len(str); i++ {
+	for i := range len(str) {
 		char := str[i]
 		switch char {
 		case '\\', '"':
@@ -60,5 +60,6 @@ func marshalString(builder *strings.Builder, str string) {
 			}
 		}
 	}
+
 	builder.WriteByte('"')
 }

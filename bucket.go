@@ -22,9 +22,9 @@ func NewBuckets(
 	payloadSize int,
 	outputPath string,
 ) Buckets {
-	var buckets Buckets
+	buckets := make(Buckets, 0, size)
 
-	for i := 0; i < size; i++ {
+	for range size {
 		buckets = append(buckets, NewBucket(payloadSize, outputPath))
 	}
 

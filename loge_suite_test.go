@@ -34,17 +34,6 @@ type cli struct{}
 func (c *cli) Kill() {}
 
 var _ = Describe("Running the application", func() {
-	// var path string
-
-	// cli := func(args ...string) *gexec.Session {
-	// 	command := exec.Command(path, args...)
-
-	// 	session, err := gexec.Start(command, GinkgoWriter, GinkgoWriter)
-	// 	Expect(err).ToNot(HaveOccurred())
-
-	// 	return session
-	// }
-
 	cli := func(args ...string) *cli {
 		command := &loge.CLI{}
 		parser, err := kong.New(command)
@@ -64,13 +53,6 @@ var _ = Describe("Running the application", func() {
 
 		return &cli{}
 	}
-
-	// BeforeEach(func() {
-	// 	var err error
-
-	// 	path, err = gexec.Build("github.com/jtarchie/loge/loge", "--tags", "fts5", "-race")
-	// 	Expect(err).NotTo(HaveOccurred())
-	// })
 
 	It("accepts a JSON payload", func() {
 		outputPath, err := os.MkdirTemp("", "")
@@ -205,16 +187,16 @@ func generatePayload() *loge.Payload {
 	payload := &loge.Payload{}
 	fake := faker.New()
 
-	for i := 0; i < rand.Intn(10)+1; i++ {
+	for range rand.Intn(10) + 1 {
 		entry := loge.Entry{
 			Stream: loge.Stream{},
 		}
 
-		for i := 0; i < rand.Intn(10)+1; i++ {
+		for range rand.Intn(10) + 1 {
 			entry.Stream[fake.Person().Name()] = fake.Lorem().Text(100)
 		}
 
-		for i := 0; i < rand.Intn(10)+1; i++ {
+		for range rand.Intn(10) + 1 {
 			entry.Values = append(entry.Values, loge.Value{
 				strconv.FormatInt(time.Now().UnixNano(), 10),
 				fake.Lorem().Sentence(10),

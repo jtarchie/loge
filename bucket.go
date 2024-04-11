@@ -3,9 +3,13 @@ package loge
 import (
 	"database/sql"
 	"fmt"
+	"io"
+	"os"
 	"path/filepath"
 	"time"
 
+	seekable "github.com/SaveTheRbtz/zstd-seekable-format-go"
+	"github.com/klauspost/compress/zstd"
 	_ "github.com/mattn/go-sqlite3"
 )
 
@@ -71,7 +75,12 @@ func (b *Bucket) flush() error {
 	if err != nil {
 		return fmt.Errorf("could not open sqlite3 %q: %w", filename, err)
 	}
-	defer client.Close()
+
+	defer func() {
+		client.Close()
+
+		b.payload = b.payload[:0]
+	}()
 
 	_, err = client.Exec(`
 		CREATE TABLE labels (
@@ -178,7 +187,44 @@ func (b *Bucket) flush() error {
 		return fmt.Errorf("could not optimize %q: %w", filename, err)
 	}
 
-	b.payload = b.payload[:0]
+	err = client.Close()
+	if err != nil {
+		return fmt.Errorf("could not close sqlite: %w", err)
+	}
+
+	output, err := os.Create(filename + ".zst")
+	if err != nil {
+		return fmt.Errorf("could not create file: %w", err)
+	}
+	defer output.Close()
+
+	input, err := os.Open(filename)
+	if err != nil {
+		return fmt.Errorf("could not create file: %w", err)
+	}
+	defer input.Close()
+
+	encoder, err := zstd.NewWriter(nil, zstd.WithEncoderLevel(zstd.SpeedBetterCompression))
+	if err != nil {
+		return fmt.Errorf("could not load zstd: %w", err)
+	}
+	defer encoder.Close()
+
+	writer, err := seekable.NewWriter(output, encoder)
+	if err != nil {
+		return fmt.Errorf("could not load writer: %w", err)
+	}
+	defer writer.Close()
+
+	_, err = io.Copy(writer, input)
+	if err != nil {
+		return fmt.Errorf("could not compress file: %w", err)
+	}
+
+	err = os.Remove(filename)
+	if err != nil {
+		return fmt.Errorf("could not remove original file: %w", err)
+	}
 
 	return nil
 }

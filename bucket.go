@@ -145,6 +145,32 @@ func (b *Bucket) flush() error {
 	}
 
 	_, err = client.Exec(`
+		CREATE VIRTUAL TABLE
+			search
+		USING
+			fts5(payload, content = 'labels', tokenize="trigram");
+
+		WITH payload AS (
+			SELECT
+				labels.id AS id,
+				json_each.key || ' ' || json_each.value AS kv
+			FROM
+				labels,
+				json_each(labels.payload)
+		)
+		INSERT INTO
+			search(rowid, payload)
+		SELECT
+			id,
+			GROUP_CONCAT(kv, ' ')
+		FROM
+			payload;
+		
+		INSERT INTO
+			search(search)
+		VALUES
+			('optimize');
+
 		vacuum;
 		pragma optimize;
 	`)

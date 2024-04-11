@@ -6,9 +6,13 @@ tasks:
     - deno fmt README.md
     - gofmt -w .
   lint: golangci-lint run --fix --timeout "10m"
-  test: go run github.com/onsi/ginkgo/v2/ginkgo -cover -race -r -p
+  test: go run github.com/onsi/ginkgo/v2/ginkgo -tags fts5 -cover -race -r -p
   default:
     cmds:
     - task: format
     - task: lint
     - task: test
+  bench:
+    cmds:
+    - k6 run benchmark/streams.msgpack.js
+    - k6 run benchmark/streams.json.js

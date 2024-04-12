@@ -17,6 +17,7 @@ import (
 	"github.com/imroc/req/v3"
 	"github.com/jaswdr/faker/v2"
 	"github.com/jtarchie/loge"
+	"github.com/jtarchie/sqlitezstd"
 	_ "github.com/mattn/go-sqlite3"
 	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
@@ -53,6 +54,11 @@ var _ = Describe("Running the application", func() {
 
 		return &cli{}
 	}
+
+	BeforeEach(func() {
+		err := sqlitezstd.Init()
+		Expect(err).NotTo(HaveOccurred())
+	})
 
 	It("accepts a JSON payload", func() {
 		outputPath, err := os.MkdirTemp("", "")
@@ -92,16 +98,16 @@ var _ = Describe("Running the application", func() {
 		}).Should(Equal(http.StatusOK))
 
 		Eventually(func() int {
-			matches, _ := filepath.Glob(filepath.Join(outputPath, "*.sqlite"))
+			matches, _ := filepath.Glob(filepath.Join(outputPath, "*.sqlite.zst"))
 
 			return len(matches)
 		}).Should(BeNumerically(">=", 1))
 
-		matches, err := filepath.Glob(filepath.Join(outputPath, "*.sqlite"))
+		matches, err := filepath.Glob(filepath.Join(outputPath, "*.sqlite.zst"))
 		Expect(err).NotTo(HaveOccurred())
 
 		sqliteFilename := matches[0]
-		dbClient, err := sql.Open("sqlite3", sqliteFilename)
+		dbClient, err := sql.Open("sqlite3", sqliteFilename+"?vfs=zstd")
 		Expect(err).NotTo(HaveOccurred())
 
 		var count int
@@ -158,16 +164,16 @@ var _ = Describe("Running the application", func() {
 		}).Should(Equal(http.StatusOK))
 
 		Eventually(func() int {
-			matches, _ := filepath.Glob(filepath.Join(outputPath, "*.sqlite"))
+			matches, _ := filepath.Glob(filepath.Join(outputPath, "*.sqlite.zst"))
 
 			return len(matches)
 		}).Should(BeNumerically(">=", 1))
 
-		matches, err := filepath.Glob(filepath.Join(outputPath, "*.sqlite"))
+		matches, err := filepath.Glob(filepath.Join(outputPath, "*.sqlite.zst"))
 		Expect(err).NotTo(HaveOccurred())
 
 		sqliteFilename := matches[0]
-		dbClient, err := sql.Open("sqlite3", sqliteFilename)
+		dbClient, err := sql.Open("sqlite3", sqliteFilename+"?vfs=zstd")
 		Expect(err).NotTo(HaveOccurred())
 
 		var count int

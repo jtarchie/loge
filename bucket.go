@@ -157,7 +157,7 @@ func (b *Bucket) flush() error {
 		CREATE VIRTUAL TABLE
 			search
 		USING
-			fts5(payload, content = 'labels', tokenize="trigram");
+			fts5(payload, content = '', columnsize=0, tokenize="trigram");
 
 		WITH payload AS (
 			SELECT

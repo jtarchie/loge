@@ -22,6 +22,7 @@ import (
 	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
 	"github.com/phayes/freeport"
+	"github.com/samber/lo"
 	"github.com/tinylib/msgp/msgp"
 )
 
@@ -183,6 +184,11 @@ var _ = Describe("Running the application", func() {
 		Expect(count).To(BeNumerically(">=", 1))
 
 		err = dbClient.QueryRow("SELECT COUNT(*) FROM streams").Scan(&count)
+		Expect(err).NotTo(HaveOccurred())
+		Expect(count).To(BeNumerically(">=", 1))
+
+		value := lo.Values(payload.Streams[0].Stream)[0]
+		err = dbClient.QueryRow(fmt.Sprintf("SELECT COUNT(*) FROM search WHERE search MATCH '%s'", value)).Scan(&count)
 		Expect(err).NotTo(HaveOccurred())
 		Expect(count).To(BeNumerically(">=", 1))
 	})

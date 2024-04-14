@@ -61,7 +61,7 @@ export default function () {
   };
 
   // Send the POST request
-  let res = http.put("http://localhost:6500/api/streams", body, params);
+  let res = http.post("http://localhost:6500/api/v1/push", body, params);
 
   // Check for HTTP status code 200
   check(res, {

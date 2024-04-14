@@ -84,7 +84,7 @@ var _ = Describe("Running the application", func() {
 			_, err := httpClient.R().
 				SetRetryCount(3).
 				SetBodyJsonMarshal(payload).
-				Put(fmt.Sprintf("http://localhost:%d/api/streams", port))
+				Post(fmt.Sprintf("http://localhost:%d/api/v1/push", port))
 
 			return err
 		}).ShouldNot(HaveOccurred())
@@ -93,7 +93,7 @@ var _ = Describe("Running the application", func() {
 			response, _ := httpClient.R().
 				SetRetryCount(3).
 				SetBodyJsonMarshal(payload).
-				Put(fmt.Sprintf("http://localhost:%d/api/streams", port))
+				Post(fmt.Sprintf("http://localhost:%d/api/v1/push", port))
 
 			return response.StatusCode
 		}).Should(Equal(http.StatusOK))
@@ -149,7 +149,7 @@ var _ = Describe("Running the application", func() {
 			_, err := httpClient.R().
 				SetRetryCount(3).
 				SetBodyJsonMarshal(payload).
-				Put(fmt.Sprintf("http://localhost:%d/api/streams", port))
+				Post(fmt.Sprintf("http://localhost:%d/api/v1/push", port))
 
 			return err
 		}).ShouldNot(HaveOccurred())
@@ -159,7 +159,7 @@ var _ = Describe("Running the application", func() {
 				SetRetryCount(3).
 				SetContentType("application/msgpack").
 				SetBodyBytes(contents.Bytes()).
-				Put(fmt.Sprintf("http://localhost:%d/api/streams", port))
+				Post(fmt.Sprintf("http://localhost:%d/api/v1/push", port))
 
 			return response.StatusCode
 		}).Should(Equal(http.StatusOK))

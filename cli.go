@@ -44,7 +44,7 @@ func (c *CLI) Run() error {
 	router.HideBanner = true
 	router.JSONSerializer = DefaultJSONSerializer{}
 
-	router.PUT("/api/streams", func(echoContext echo.Context) error {
+	router.POST("/api/v1/push", func(echoContext echo.Context) error {
 		payload := &Payload{}
 
 		contentType := echoContext.Request().Header.Get(echo.HeaderContentType)

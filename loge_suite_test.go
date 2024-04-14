@@ -191,6 +191,20 @@ var _ = Describe("Running the application", func() {
 		err = dbClient.QueryRow(fmt.Sprintf("SELECT COUNT(*) FROM search WHERE search MATCH '%s'", value)).Scan(&count)
 		Expect(err).NotTo(HaveOccurred())
 		Expect(count).To(BeNumerically(">=", 1))
+
+		var labelResponse loge.LabelResponse
+		_, err = httpClient.R().
+			SetRetryCount(3).
+			SetSuccessResult(&labelResponse).
+			Get(fmt.Sprintf("http://localhost:%d/api/v1/labels", port))
+
+		Expect(err).NotTo(HaveOccurred())
+		Expect(labelResponse.Status).To(Equal("success"))
+
+		knownLabels := lo.FlatMap(payload.Streams, func(entry loge.Entry, _ int) []string {
+			return lo.Keys(entry.Stream)
+		})
+		Expect(labelResponse.Data).To(ConsistOf(knownLabels))
 	})
 })
 

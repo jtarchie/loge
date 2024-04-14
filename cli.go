@@ -1,20 +1,17 @@
 package loge
 
 import (
-	"database/sql"
 	"errors"
 	"fmt"
 	"log/slog"
 	"net/http"
 	"os"
-	"path/filepath"
 	"strings"
 
 	"github.com/goccy/go-json"
 	"github.com/jtarchie/sqlitezstd"
 	"github.com/labstack/echo/v4"
 	"github.com/labstack/echo/v4/middleware"
-	"github.com/samber/lo"
 	slogecho "github.com/samber/slog-echo"
 	"github.com/tinylib/msgp/msgp"
 )
@@ -38,6 +35,7 @@ func (c *CLI) Run() error {
 	}
 
 	buckets := NewBuckets(c.Buckets, c.PayloadSize, c.OutputPath)
+	manager := NewManager(c.OutputPath)
 
 	router := echo.New()
 	router.Use(slogecho.New(slog.Default()))
@@ -71,36 +69,14 @@ func (c *CLI) Run() error {
 	})
 
 	router.GET("/api/v1/labels", func(echoContext echo.Context) error {
-		files, err := filepath.Glob(filepath.Join(c.OutputPath, "*.sqlite.zst"))
+		labels, err := manager.Labels()
 		if err != nil {
-			return fmt.Errorf("could not load files: %w", err)
-		}
-
-		var foundLabels []string
-
-		for _, filename := range files {
-			client, err := sql.Open("sqlite3", filename+"?vfs=zstd")
-			if err != nil {
-				return fmt.Errorf("could not open sqlite3 %q: %w", filename, err)
-			}
-			defer client.Close()
-
-			labels, err := findLabels(echoContext.Request().Context(), client)
-			if err != nil {
-				return fmt.Errorf("could not find labels: %w", err)
-			}
-
-			foundLabels = append(foundLabels, labels...)
-
-			err = client.Close()
-			if err != nil {
-				return fmt.Errorf("could not close connection: %w", err)
-			}
+			return fmt.Errorf("could not load labels: %w", err)
 		}
 
 		return echoContext.JSON(http.StatusOK, LabelResponse{
 			Status: "success",
-			Data:   lo.Uniq(foundLabels),
+			Data:   labels,
 		})
 	})
 

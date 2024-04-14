@@ -4,11 +4,13 @@ import (
 	"database/sql"
 	"fmt"
 	"io"
+	"log/slog"
 	"os"
 	"path/filepath"
 	"time"
 
 	seekable "github.com/SaveTheRbtz/zstd-seekable-format-go"
+	"github.com/jtarchie/worker"
 	"github.com/klauspost/compress/zstd"
 	_ "github.com/mattn/go-sqlite3"
 )
@@ -19,29 +21,37 @@ type Bucket struct {
 	outputDir   string
 }
 
-type Buckets []*Bucket
+type Buckets struct {
+	buckets []*Bucket
+	workers *worker.Worker[*Payload]
+}
 
 func NewBuckets(
 	size int,
 	payloadSize int,
 	outputPath string,
-) Buckets {
-	buckets := make(Buckets, 0, size)
+) *Buckets {
+	buckets := make([]*Bucket, 0, size)
 
 	for range size {
 		buckets = append(buckets, NewBucket(payloadSize, outputPath))
 	}
 
-	return buckets
+	workers := worker.New(payloadSize, size, func(index int, payload *Payload) {
+		err := buckets[index-1].Append(payload)
+		if err != nil {
+			slog.Error("could not append to bucket", slog.Int("index", index), slog.String("error", err.Error()))
+		}
+	})
+
+	return &Buckets{
+		buckets: buckets,
+		workers: workers,
+	}
 }
 
-func (b Buckets) Append(index int, payload *Payload) error {
-	err := b[index].Append(payload)
-	if err != nil {
-		return fmt.Errorf("could not append to bucket %d: %w", index, err)
-	}
-
-	return nil
+func (b *Buckets) Append(payload *Payload) {
+	_ = b.workers.Enqueue(payload)
 }
 
 func NewBucket(

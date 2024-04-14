@@ -12,7 +12,6 @@ import (
 
 	"github.com/goccy/go-json"
 	"github.com/jtarchie/sqlitezstd"
-	"github.com/jtarchie/worker"
 	"github.com/labstack/echo/v4"
 	"github.com/labstack/echo/v4/middleware"
 	"github.com/samber/lo"
@@ -40,13 +39,6 @@ func (c *CLI) Run() error {
 
 	buckets := NewBuckets(c.Buckets, c.PayloadSize, c.OutputPath)
 
-	bucketWorkers := worker.New(c.PayloadSize, c.Buckets, func(index int, payload *Payload) {
-		err := buckets.Append(index-1, payload)
-		if err != nil {
-			slog.Error("could not append to bucket", slog.Int("index", index), slog.String("error", err.Error()))
-		}
-	})
-
 	router := echo.New()
 	router.Use(slogecho.New(slog.Default()))
 	router.Use(middleware.Recover())
@@ -73,7 +65,7 @@ func (c *CLI) Run() error {
 			return errors.New("could not read streams")
 		}
 
-		bucketWorkers.Enqueue(payload)
+		buckets.Append(payload)
 
 		return echoContext.String(http.StatusOK, "")
 	})

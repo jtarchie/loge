@@ -31,8 +31,13 @@ func (c *CLI) Run() error {
 		return fmt.Errorf("could not create directory: %w", err)
 	}
 
+	manager, err := managers.NewLocal(c.OutputPath)
+	if err != nil {
+		return fmt.Errorf("could not start manager: %w", err)
+	}
+	defer manager.Close()
+
 	buckets := NewBuckets(c.Buckets, c.PayloadSize, c.OutputPath)
-	manager := managers.NewLocal(c.OutputPath)
 
 	router := echo.New()
 	router.Use(slogecho.New(slog.Default()))

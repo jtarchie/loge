@@ -48,9 +48,11 @@ var _ = Describe("Local", func() {
 			matches, _ := filepath.Glob(filepath.Join(outputPath, "*.sqlite.zst"))
 
 			return len(matches)
-		}).Should(BeNumerically("==", 1))
+		}).Should(BeNumerically("==", 1), "5s")
 
-		manager := managers.NewLocal(outputPath)
+		manager, err := managers.NewLocal(outputPath)
+		Expect(err).NotTo(HaveOccurred())
+		defer manager.Close()
 
 		labels, err := manager.Labels()
 		Expect(err).NotTo(HaveOccurred())

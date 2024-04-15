@@ -23,8 +23,10 @@ require (
 require (
 	github.com/SaveTheRbtz/fastcdc-go v0.3.0 // indirect
 	github.com/andybalholm/brotli v1.1.0 // indirect
+	github.com/benbjohnson/immutable v0.4.3 // indirect
 	github.com/cespare/xxhash/v2 v2.3.0 // indirect
 	github.com/cloudflare/circl v1.3.7 // indirect
+	github.com/fsnotify/fsnotify v1.7.0 // indirect
 	github.com/georgysavva/scany/v2 v2.1.3 // indirect
 	github.com/go-logr/logr v1.4.1 // indirect
 	github.com/go-task/slim-sprig v0.0.0-20230315185526-52ccab3ef572 // indirect

@@ -88,7 +88,7 @@ var _ = Describe("Running the application", func() {
 			matches, _ := filepath.Glob(filepath.Join(outputPath, "*.sqlite.zst"))
 
 			return len(matches)
-		}).Should(BeNumerically(">=", 1))
+		}).Should(BeNumerically(">=", 1), "5s")
 	})
 
 	It("accepts a MsgPack payload", func() {
@@ -136,7 +136,7 @@ var _ = Describe("Running the application", func() {
 			matches, _ := filepath.Glob(filepath.Join(outputPath, "*.sqlite.zst"))
 
 			return len(matches)
-		}).Should(BeNumerically(">=", 1))
+		}).Should(BeNumerically(">=", 1), "5s")
 
 		var labelResponse loge.LabelResponse
 		_, err = httpClient.R().

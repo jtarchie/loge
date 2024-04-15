@@ -1,4 +1,4 @@
-package loge_test
+package managers_test
 
 import (
 	"fmt"
@@ -6,12 +6,13 @@ import (
 	"path/filepath"
 
 	"github.com/jtarchie/loge"
+	"github.com/jtarchie/loge/managers"
 	"github.com/jtarchie/sqlitezstd"
 	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
 )
 
-var _ = Describe("Manager", func() {
+var _ = Describe("Local", func() {
 	var outputPath string
 
 	BeforeEach(func() {
@@ -49,7 +50,7 @@ var _ = Describe("Manager", func() {
 			return len(matches)
 		}).Should(BeNumerically("==", 1))
 
-		manager := loge.NewManager(outputPath)
+		manager := managers.NewLocal(outputPath)
 
 		labels, err := manager.Labels()
 		Expect(err).NotTo(HaveOccurred())

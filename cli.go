@@ -6,6 +6,7 @@ import (
 	"net/http"
 	"os"
 
+	"github.com/jtarchie/loge/managers"
 	"github.com/jtarchie/sqlitezstd"
 	"github.com/labstack/echo/v4"
 	"github.com/labstack/echo/v4/middleware"
@@ -31,7 +32,7 @@ func (c *CLI) Run() error {
 	}
 
 	buckets := NewBuckets(c.Buckets, c.PayloadSize, c.OutputPath)
-	manager := NewManager(c.OutputPath)
+	manager := managers.NewLocal(c.OutputPath)
 
 	router := echo.New()
 	router.Use(slogecho.New(slog.Default()))

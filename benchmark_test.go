@@ -6,6 +6,7 @@ import (
 	"testing"
 
 	"github.com/jtarchie/loge"
+	"github.com/jtarchie/loge/managers"
 	"github.com/jtarchie/sqlitezstd"
 )
 
@@ -42,7 +43,7 @@ func BenchmarkParseRegex(b *testing.B) {
 		buckets.Append(payload)
 	}
 
-	manager := loge.NewManager(outputPath)
+	manager := managers.NewLocal(outputPath)
 
 	b.ResetTimer() // Start timing now.
 

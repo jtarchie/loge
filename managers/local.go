@@ -1,4 +1,4 @@
-package loge
+package managers
 
 import (
 	"context"
@@ -10,19 +10,19 @@ import (
 	"github.com/samber/lo"
 )
 
-type Manager struct {
+type Local struct {
 	outputDir string
 }
 
-func NewManager(
+func NewLocal(
 	outputPath string,
-) *Manager {
-	return &Manager{
+) *Local {
+	return &Local{
 		outputDir: outputPath,
 	}
 }
 
-func (m *Manager) files() ([]string, error) {
+func (m *Local) files() ([]string, error) {
 	files, err := filepath.Glob(filepath.Join(m.outputDir, "*.sqlite.zst"))
 	if err != nil {
 		return nil, fmt.Errorf("could not load files: %w", err)
@@ -31,7 +31,7 @@ func (m *Manager) files() ([]string, error) {
 	return files, nil
 }
 
-func (m *Manager) Labels() ([]string, error) {
+func (m *Local) Labels() ([]string, error) {
 	var foundLabels []string
 
 	files, err := m.files()

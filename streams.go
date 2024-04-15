@@ -12,9 +12,27 @@ type Entry struct {
 	Values Values `json:"values" msg:"values"`
 }
 
-type Entries []Entry
+type Streams []Entry
 
 //go:generate msgp -tests=false
 type Payload struct {
-	Streams Entries `json:"streams" msg:"streams"`
+	Streams Streams `json:"streams" msg:"streams"`
+}
+
+func (p *Payload) Valid() (string, bool) {
+	if len(p.Streams) == 0 {
+		return "At least one stream is required", false
+	}
+
+	for _, stream := range p.Streams {
+		if len(stream.Stream) == 0 {
+			return "Each stream requires labels", false
+		}
+
+		if len(stream.Values) == 0 {
+			return "Each stream requires a value", false
+		}
+	}
+
+	return "", true
 }

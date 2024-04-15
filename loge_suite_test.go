@@ -205,6 +205,17 @@ var _ = Describe("Running the application", func() {
 			return lo.Keys(entry.Stream)
 		})
 		Expect(labelResponse.Data).To(ConsistOf(knownLabels))
+
+		response, err := httpClient.R().
+			SetRetryCount(3).
+			SetHeader("Accept", "application/msgpack").
+			Get(fmt.Sprintf("http://localhost:%d/api/v1/labels", port))
+		Expect(err).NotTo(HaveOccurred())
+
+		err = msgp.Decode(response.Body, &labelResponse)
+		Expect(err).NotTo(HaveOccurred())
+		Expect(labelResponse.Status).To(Equal("success"))
+		Expect(labelResponse.Data).To(ConsistOf(knownLabels))
 	})
 })
 

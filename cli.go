@@ -58,7 +58,7 @@ func (c *CLI) Run() error {
 			return fmt.Errorf("could not load labels: %w", err)
 		}
 
-		return context.JSON(http.StatusOK, LabelResponse{
+		return response(context, http.StatusOK, &LabelResponse{
 			Status: "success",
 			Data:   labels,
 		})

@@ -14,7 +14,7 @@ type Entry struct {
 
 type Entries []Entry
 
-//go:generate go run github.com/tinylib/msgp -tests=false
+//go:generate msgp -tests=false
 type Payload struct {
 	Streams Entries `json:"streams" msg:"streams"`
 }

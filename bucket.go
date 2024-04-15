@@ -202,11 +202,15 @@ func (b *Bucket) flush() error {
 		return fmt.Errorf("could not close sqlite: %w", err)
 	}
 
-	output, err := os.Create(filename + ".zst")
+	output, err := os.Create(filename + ".zst.partial")
 	if err != nil {
 		return fmt.Errorf("could not create file: %w", err)
 	}
-	defer output.Close()
+
+	defer func() {
+		_ = output.Close()
+		_ = os.Rename(filename+".zst.partial", filename+".zst")
+	}()
 
 	input, err := os.Open(filename)
 	if err != nil {

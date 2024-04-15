@@ -10,7 +10,7 @@ import (
 	"github.com/jtarchie/sqlitezstd"
 )
 
-func BenchmarkParseRegex(b *testing.B) {
+func BenchmarkLocalManager(b *testing.B) {
 	err := sqlitezstd.Init()
 	if err != nil {
 		b.Errorf("could not init: %s", err)

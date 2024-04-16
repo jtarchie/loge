@@ -114,7 +114,7 @@ func (b *Bucket) flush() error {
 		return fmt.Errorf("could not create transaction %q: %w", filename, err)
 	}
 
-	defer func() { _ = transaction.Rollback() }()
+	defer transaction.Rollback()
 
 	insertStream, err := transaction.Prepare(`
 		INSERT INTO streams
@@ -126,7 +126,7 @@ func (b *Bucket) flush() error {
 		return fmt.Errorf("could not prepare insert %q: %w", filename, err)
 	}
 
-	defer func() { _ = insertStream.Close() }()
+	defer insertStream.Close()
 
 	insertLabels, err := transaction.Prepare(`
 		INSERT INTO labels
@@ -138,7 +138,7 @@ func (b *Bucket) flush() error {
 		return fmt.Errorf("could not prepare insert %q: %w", filename, err)
 	}
 
-	defer func() { _ = insertLabels.Close() }()
+	defer insertLabels.Close()
 
 	for _, payload := range b.payload {
 		for _, stream := range payload.Streams {

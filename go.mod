@@ -9,12 +9,12 @@ require (
 	github.com/georgysavva/scany/v2 v2.1.3
 	github.com/goccy/go-json v0.10.2
 	github.com/hashicorp/golang-lru/v2 v2.0.7
-	github.com/imroc/req/v3 v3.43.2
+	github.com/imroc/req/v3 v3.43.3
 	github.com/jaswdr/faker/v2 v2.1.0
-	github.com/jtarchie/sqlitezstd v0.0.0-20240413163231-b4e22906e076
+	github.com/jtarchie/sqlitezstd v0.0.0-20240414030833-021a23371080
 	github.com/jtarchie/worker v0.0.0-20240413165220-bc5e929e58ff
 	github.com/klauspost/compress v1.17.8
-	github.com/labstack/echo/v4 v4.11.4
+	github.com/labstack/echo/v4 v4.12.0
 	github.com/mattn/go-sqlite3 v1.14.22
 	github.com/onsi/ginkgo/v2 v2.17.1
 	github.com/onsi/gomega v1.32.0
@@ -34,7 +34,7 @@ require (
 	github.com/golang-jwt/jwt v3.2.2+incompatible // indirect
 	github.com/google/btree v1.1.2 // indirect
 	github.com/google/go-cmp v0.6.0 // indirect
-	github.com/google/pprof v0.0.0-20240409012703-83162a5b38cd // indirect
+	github.com/google/pprof v0.0.0-20240415144954-be81aee2d733 // indirect
 	github.com/hashicorp/errwrap v1.1.0 // indirect
 	github.com/hashicorp/go-multierror v1.1.1 // indirect
 	github.com/kr/pretty v0.3.1 // indirect

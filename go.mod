@@ -12,7 +12,7 @@ require (
 	github.com/imroc/req/v3 v3.43.3
 	github.com/jaswdr/faker/v2 v2.1.0
 	github.com/jtarchie/sqlitezstd v0.0.0-20240414030833-021a23371080
-	github.com/jtarchie/worker v0.0.0-20240413165220-bc5e929e58ff
+	github.com/jtarchie/worker v0.0.0-20240416163505-74a8b7fb687b
 	github.com/klauspost/compress v1.17.8
 	github.com/labstack/echo/v4 v4.12.0
 	github.com/mattn/go-sqlite3 v1.14.22

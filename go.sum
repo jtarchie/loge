@@ -68,8 +68,8 @@ github.com/jaswdr/faker/v2 v2.1.0 h1:WH3gmTasNM2UctjTFAGpItyLkzei+Z48hG0VIKL1sAw
 github.com/jaswdr/faker/v2 v2.1.0/go.mod h1:ROK8xwQV0hYOLDUtxCQgHGcl10jbVzIvqHxcIDdwY2Q=
 github.com/jtarchie/sqlitezstd v0.0.0-20240414030833-021a23371080 h1:NeQrq2dV1RVkGSSecxAFCP0r96INpFmiUV1N7x4EEcI=
 github.com/jtarchie/sqlitezstd v0.0.0-20240414030833-021a23371080/go.mod h1:Hy5LbBlv9pJMhXJ0X46qglueCyYwWjJMsM72wTJxf68=
-github.com/jtarchie/worker v0.0.0-20240413165220-bc5e929e58ff h1:sFfJyUOM8vAn6CnVnnOK6Vs3mEedH/sfCZnJFij7XN8=
-github.com/jtarchie/worker v0.0.0-20240413165220-bc5e929e58ff/go.mod h1:YiBLsyfdCY0TclqEzNvK46TQbxe2GgNa/Jqopbnz+DA=
+github.com/jtarchie/worker v0.0.0-20240416163505-74a8b7fb687b h1:6RnNUw9GmiorJ6cjFTLoNAzxY9zoSRBI8IZOINfocno=
+github.com/jtarchie/worker v0.0.0-20240416163505-74a8b7fb687b/go.mod h1:YiBLsyfdCY0TclqEzNvK46TQbxe2GgNa/Jqopbnz+DA=
 github.com/klauspost/compress v1.17.8 h1:YcnTYrq7MikUT7k0Yb5eceMmALQPYBW/Xltxn0NAMnU=
 github.com/klauspost/compress v1.17.8/go.mod h1:Di0epgTjJY877eYKx5yC51cX2A2Vl2ibi7bDH9ttBbw=
 github.com/kr/pretty v0.3.1 h1:flRD4NNwYAUpkphVc1HcthR4KEIFJ65n8Mw5qdRn3LE=

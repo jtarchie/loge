@@ -15,6 +15,6 @@ tasks:
     - task: test
   bench:
     cmds:
-    - go test -tags fts5 -bench=. -benchtime=1000x -benchmem -run ^$
+    - go test -tags fts5 -bench=. -benchmem -run ^$
     - k6 run benchmark/streams.msgpack.js
     - k6 run benchmark/streams.json.js

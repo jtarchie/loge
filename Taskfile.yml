@@ -7,6 +7,7 @@ tasks:
     - gofmt -w .
   lint: golangci-lint run --fix --timeout "10m"
   test: go run github.com/onsi/ginkgo/v2/ginkgo -tags fts5 -cover -race -r
+  server: go run -tags fts5 loge/main.go --port 6500 --payload-size 100000
   default:
     cmds:
     - go generate ./...
@@ -15,6 +16,7 @@ tasks:
     - task: test
   bench:
     cmds:
+    - rm -Rf tmp/
     - go test -tags fts5 -bench=. -benchmem -run ^$
     - k6 run benchmark/streams.msgpack.js
     - k6 run benchmark/streams.json.js

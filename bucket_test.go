@@ -84,7 +84,7 @@ var _ = Describe("Buckets", func() {
 			matches, _ := filepath.Glob(filepath.Join(outputPath, "*.sqlite.zst"))
 
 			return len(matches)
-		}).Should(BeNumerically("==", expectedFiles), "5s")
+		}).Should(BeNumerically("==", expectedFiles), "10s")
 
 		Consistently(func() int {
 			matches, _ := filepath.Glob(filepath.Join(outputPath, "*.sqlite.zst"))

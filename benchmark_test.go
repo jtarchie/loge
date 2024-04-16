@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"os"
 	"testing"
+	"time"
 
 	"github.com/jtarchie/loge"
 	"github.com/jtarchie/loge/managers"
@@ -49,20 +50,24 @@ func BenchmarkLocalManager(b *testing.B) {
 		buckets.Append(payload)
 	}
 
+	// warmup manager
+	for range 1_000 {
+		labels, _ := manager.Labels()
+		if len(labels) == 1000 {
+			break
+		}
+
+		time.Sleep(time.Millisecond)
+	}
+
 	b.ResetTimer() // Start timing now.
 
-	// b.RunParallel(func(pb *testing.PB) {
-	// 	for pb.Next() {
-	// 		labels, _ := manager.Labels()
-	// 		if len(labels) > 1000 {
-	// 			b.Fatalf("something happened")
-	// 		}
-	// 	}
-	// })
-	for i := 0; i < b.N; i++ {
-		labels, _ := manager.Labels()
-		if len(labels) > 1000 {
-			b.Fatalf("something happened")
+	b.RunParallel(func(pb *testing.PB) {
+		for pb.Next() {
+			labels, _ := manager.Labels()
+			if len(labels) > 1000 {
+				b.Fatalf("something happened")
+			}
 		}
-	}
+	})
 }

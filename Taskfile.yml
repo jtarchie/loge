@@ -18,5 +18,6 @@ tasks:
     cmds:
     - rm -Rf tmp/
     - go test -tags fts5 -bench=. -benchmem -run ^$
+    - while ! nc -z localhost 6500; do sleep 1; done
     - k6 run benchmark/streams.msgpack.js
     - k6 run benchmark/streams.json.js

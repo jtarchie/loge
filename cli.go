@@ -2,7 +2,6 @@ package loge
 
 import (
 	"fmt"
-	"log/slog"
 	"net/http"
 	"os"
 
@@ -10,7 +9,6 @@ import (
 	"github.com/jtarchie/sqlitezstd"
 	"github.com/labstack/echo/v4"
 	"github.com/labstack/echo/v4/middleware"
-	slogecho "github.com/samber/slog-echo"
 )
 
 type CLI struct {
@@ -40,7 +38,6 @@ func (c *CLI) Run() error {
 	buckets := NewBuckets(c.Buckets, c.PayloadSize, c.OutputPath)
 
 	router := echo.New()
-	router.Use(slogecho.New(slog.Default()))
 	router.Use(middleware.Recover())
 	router.HideBanner = true
 	router.JSONSerializer = DefaultJSONSerializer{}

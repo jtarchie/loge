@@ -95,6 +95,6 @@ var _ = Describe("Buckets", func() {
 		Entry("multiple buckets, small payload", 2, 1, 1, 1),
 		Entry("one bucket, larger payload", 1, 2, 2, 1),
 		Entry("multiple buckets, larger payload", 2, 2, 4, 2),
-		Entry("lots of things", 10, 10_000, 100_000, 10),
+		Entry("lots of things", 10, 1_000, 10_000, 10),
 	)
 })

@@ -114,7 +114,7 @@ func (b *Bucket) flush() error {
 		return fmt.Errorf("could not create transaction %q: %w", filename, err)
 	}
 
-	defer transaction.Rollback()
+	defer func() { _ = transaction.Rollback() }()
 
 	insertStream, err := transaction.Prepare(`
 		INSERT INTO streams

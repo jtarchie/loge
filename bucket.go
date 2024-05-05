@@ -81,6 +81,11 @@ func (b *Bucket) Append(payload *Payload) error {
 func (b *Bucket) flush() error {
 	filename := filepath.Join(b.outputDir, fmt.Sprintf("%d.sqlite", time.Now().UnixNano()))
 
+	err := os.MkdirAll(b.outputDir, os.ModePerm)
+	if err != nil {
+		return fmt.Errorf("could not create directory: %w", err)
+	}
+
 	client, err := sql.Open("sqlite3", filename)
 	if err != nil {
 		return fmt.Errorf("could not open sqlite3 %q: %w", filename, err)

@@ -12,7 +12,7 @@ import (
 
 type FileWatcher struct {
 	compiled *regexp.Regexp
-	files    []string
+	files    map[string]struct{}
 	mutex    *sync.RWMutex
 	watcher  *fsnotify.Watcher
 }
@@ -30,7 +30,7 @@ func New(path string, compiled *regexp.Regexp) (*FileWatcher, error) {
 
 	fileWatcher := &FileWatcher{
 		compiled: compiled,
-		files:    []string{},
+		files:    map[string]struct{}{},
 		mutex:    &sync.RWMutex{},
 		watcher:  watcher,
 	}
@@ -41,9 +41,7 @@ func New(path string, compiled *regexp.Regexp) (*FileWatcher, error) {
 	}
 
 	for _, match := range matches {
-		if compiled.MatchString(match) {
-			fileWatcher.files = append(fileWatcher.files, match)
-		}
+		fileWatcher.add(match)
 	}
 
 	go fileWatcher.init()
@@ -52,12 +50,20 @@ func New(path string, compiled *regexp.Regexp) (*FileWatcher, error) {
 	return fileWatcher, nil
 }
 
+func (f *FileWatcher) add(filename string) {
+	f.mutex.Lock()
+	defer f.mutex.Unlock()
+
+	filename, _ = filepath.Abs(filename)
+	if f.compiled.MatchString(filename) {
+		f.files[filename] = struct{}{}
+	}
+}
+
 func (f *FileWatcher) init() {
 	for event := range f.watcher.Events {
-		if event.Has(fsnotify.Create) && f.compiled.MatchString(event.Name) {
-			f.mutex.Lock()
-			f.files = append(f.files, event.Name)
-			f.mutex.Unlock()
+		if event.Has(fsnotify.Create) {
+			f.add(event.Name)
 		}
 	}
 }
@@ -66,7 +72,7 @@ func (f *FileWatcher) Iterate(fun func(string) error) error {
 	f.mutex.RLock()
 	defer f.mutex.RUnlock()
 
-	for _, file := range f.files {
+	for file := range f.files {
 		err := fun(file)
 		if err != nil {
 			return fmt.Errorf("watcher failed execution: %w", err)

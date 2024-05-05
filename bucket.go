@@ -180,7 +180,7 @@ func (b *Bucket) flush() error {
 	defer func() {
 		b.insertStream.Close()
 		b.insertLabels.Close()
-		b.transaction.Rollback()
+		_ = b.transaction.Rollback()
 		b.client.Close()
 
 		b.client = nil

@@ -14,7 +14,7 @@ func TestLoge(t *testing.T) {
 	RunSpecs(t, "Loge Suite")
 }
 
-//nolint: gochecknoglobals
+// nolint: gochecknoglobals
 var oneValue = &loge.Payload{
 	Streams: loge.Streams{
 		{

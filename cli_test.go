@@ -165,7 +165,7 @@ var _ = Describe("Running the application", func() {
 	})
 })
 
-//nolint: gosec
+// nolint: gosec
 func generatePayload() *loge.Payload {
 	payload := &loge.Payload{}
 	fake := faker.New()

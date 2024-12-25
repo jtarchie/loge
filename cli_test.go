@@ -2,7 +2,6 @@ package loge_test
 
 import (
 	"bytes"
-	"encoding/json"
 	"fmt"
 	"math/rand"
 	"net/http"
@@ -99,16 +98,6 @@ var _ = Describe("Running the application", func() {
 			return lo.Keys(entry.Stream)
 		})
 		Expect(labelResponse.Data).To(ConsistOf(knownLabels))
-
-		response, err := httpClient.R().
-			SetRetryCount(3).
-			Get(fmt.Sprintf("http://localhost:%d/api/v1/labels", port))
-		Expect(err).NotTo(HaveOccurred())
-
-		err = json.NewDecoder(response.Body).Decode(&labelResponse)
-		Expect(err).NotTo(HaveOccurred())
-		Expect(labelResponse.Status).To(Equal("success"))
-		Expect(labelResponse.Data).To(ConsistOf(knownLabels))
 	})
 
 	It("accepts a MsgPack payload", func() {
@@ -159,19 +148,6 @@ var _ = Describe("Running the application", func() {
 		}).Should(BeNumerically(">=", 1), "5s")
 
 		var labelResponse loge.LabelResponse
-		_, err = httpClient.R().
-			SetRetryCount(3).
-			SetSuccessResult(&labelResponse).
-			Get(fmt.Sprintf("http://localhost:%d/api/v1/labels", port))
-
-		Expect(err).NotTo(HaveOccurred())
-		Expect(labelResponse.Status).To(Equal("success"))
-
-		knownLabels := lo.FlatMap(payload.Streams, func(entry loge.Entry, _ int) []string {
-			return lo.Keys(entry.Stream)
-		})
-		Expect(labelResponse.Data).To(ConsistOf(knownLabels))
-
 		response, err := httpClient.R().
 			SetRetryCount(3).
 			SetHeader("Accept", "application/msgpack").
@@ -181,6 +157,10 @@ var _ = Describe("Running the application", func() {
 		err = msgp.Decode(response.Body, &labelResponse)
 		Expect(err).NotTo(HaveOccurred())
 		Expect(labelResponse.Status).To(Equal("success"))
+
+		knownLabels := lo.FlatMap(payload.Streams, func(entry loge.Entry, _ int) []string {
+			return lo.Keys(entry.Stream)
+		})
 		Expect(labelResponse.Data).To(ConsistOf(knownLabels))
 	})
 })

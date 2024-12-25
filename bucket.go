@@ -10,7 +10,7 @@ import (
 	"sync/atomic"
 	"time"
 
-	seekable "github.com/SaveTheRbtz/zstd-seekable-format-go"
+	seekable "github.com/SaveTheRbtz/zstd-seekable-format-go/pkg"
 	"github.com/jtarchie/worker"
 	"github.com/klauspost/compress/zstd"
 	_ "github.com/mattn/go-sqlite3"

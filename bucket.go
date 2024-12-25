@@ -128,13 +128,18 @@ func (b *Bucket) prepare() error {
 	_, err = client.Exec(`
 		CREATE TABLE labels (
 			id INTEGER PRIMARY KEY AUTOINCREMENT,
+			-- payload is a key-value store of string-string pairs
 			payload BLOB
 		) STRICT;
 
 		CREATE TABLE streams (
 			id INTEGER PRIMARY KEY AUTOINCREMENT,
+			-- timestamp is the unix timestamp in nanoseconds
 			timestamp INTEGER,
+			-- line is the log line
 			line TEXT,
+			-- label_id is the foreign key to the labels table
+			-- no constraint is enforced
 			label_id INTEGER
 		) STRICT;
 	`)

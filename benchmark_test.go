@@ -8,15 +8,10 @@ import (
 
 	"github.com/jtarchie/loge"
 	"github.com/jtarchie/loge/managers"
-	"github.com/jtarchie/sqlitezstd"
+	_ "github.com/jtarchie/sqlitezstd"
 )
 
 func BenchmarkLocalManager(b *testing.B) {
-	err := sqlitezstd.Init()
-	if err != nil {
-		b.Fatalf("could not init: %s", err)
-	}
-
 	outputPath, err := os.MkdirTemp("", "")
 	if err != nil {
 		b.Fatalf("could not create directory: %s", err)

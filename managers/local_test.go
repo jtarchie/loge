@@ -7,7 +7,7 @@ import (
 
 	"github.com/jtarchie/loge"
 	"github.com/jtarchie/loge/managers"
-	"github.com/jtarchie/sqlitezstd"
+	_ "github.com/jtarchie/sqlitezstd"
 	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
 )
@@ -16,8 +16,7 @@ var _ = Describe("Local", func() {
 	var outputPath string
 
 	BeforeEach(func() {
-		err := sqlitezstd.Init()
-		Expect(err).NotTo(HaveOccurred())
+		var err error
 
 		outputPath, err = os.MkdirTemp("", "")
 		Expect(err).NotTo(HaveOccurred())

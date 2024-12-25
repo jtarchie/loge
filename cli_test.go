@@ -15,7 +15,7 @@ import (
 	"github.com/imroc/req/v3"
 	"github.com/jaswdr/faker/v2"
 	"github.com/jtarchie/loge"
-	"github.com/jtarchie/sqlitezstd"
+	_ "github.com/jtarchie/sqlitezstd"
 	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
 	"github.com/phayes/freeport"
@@ -43,11 +43,6 @@ func StartCLI(args ...string) {
 }
 
 var _ = Describe("Running the application", func() {
-	BeforeEach(func() {
-		err := sqlitezstd.Init()
-		Expect(err).NotTo(HaveOccurred())
-	})
-
 	It("accepts a JSON payload", func() {
 		outputPath, err := os.MkdirTemp("", "")
 		Expect(err).NotTo(HaveOccurred())

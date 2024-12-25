@@ -11,7 +11,7 @@ require (
 	github.com/hashicorp/golang-lru/v2 v2.0.7
 	github.com/imroc/req/v3 v3.49.1
 	github.com/jaswdr/faker/v2 v2.3.3
-	github.com/jtarchie/sqlitezstd v0.0.0-20241204192250-bb0bbb425db0
+	github.com/jtarchie/sqlitezstd v0.0.0-20241225211909-2e20eae11eaf
 	github.com/jtarchie/worker v0.0.0-20240513013643-934cdf402337
 	github.com/klauspost/compress v1.17.11
 	github.com/labstack/echo/v4 v4.13.3

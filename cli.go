@@ -6,7 +6,7 @@ import (
 	"os"
 
 	"github.com/jtarchie/loge/managers"
-	"github.com/jtarchie/sqlitezstd"
+	_ "github.com/jtarchie/sqlitezstd"
 	"github.com/labstack/echo/v4"
 	"github.com/labstack/echo/v4/middleware"
 )
@@ -19,12 +19,7 @@ type CLI struct {
 }
 
 func (c *CLI) Run() error {
-	err := sqlitezstd.Init()
-	if err != nil {
-		return fmt.Errorf("could not initialize zstd support: %w", err)
-	}
-
-	err = os.MkdirAll(c.OutputPath, os.ModePerm)
+	err := os.MkdirAll(c.OutputPath, os.ModePerm)
 	if err != nil {
 		return fmt.Errorf("could not create directory: %w", err)
 	}

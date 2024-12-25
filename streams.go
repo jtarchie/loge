@@ -1,11 +1,22 @@
 package loge
 
+import "strconv"
+
 type Stream map[string]string
 
 type (
 	Value  [2]string
 	Values []Value
 )
+
+func (v *Value) Timestamp() int64 {
+	value, err := strconv.ParseInt(v[0], 10, 64)
+	if err != nil {
+		return 0
+	}
+
+	return int64(value)
+}
 
 type Entry struct {
 	Stream Stream `json:"stream" msg:"stream"`

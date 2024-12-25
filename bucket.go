@@ -91,7 +91,7 @@ func (b *Bucket) Append(payload *Payload) error {
 		labelID, _ := resultLabel.LastInsertId()
 
 		for _, value := range stream.Values {
-			_, err := b.insertStream.Exec(value[0], value[1], labelID)
+			_, err := b.insertStream.Exec(value.Timestamp(), value[1], labelID)
 			if err != nil {
 				return fmt.Errorf("could not insert %q: %w", b.filename, err)
 			}
@@ -128,15 +128,15 @@ func (b *Bucket) prepare() error {
 	_, err = client.Exec(`
 		CREATE TABLE labels (
 			id INTEGER PRIMARY KEY AUTOINCREMENT,
-			payload JSONB
-		);
+			payload BLOB
+		) STRICT;
 
 		CREATE TABLE streams (
 			id INTEGER PRIMARY KEY AUTOINCREMENT,
 			timestamp INTEGER,
 			line TEXT,
 			label_id INTEGER
-		);
+		) STRICT;
 	`)
 	if err != nil {
 		return fmt.Errorf("could not create schema %q: %w", filename, err)
@@ -161,7 +161,7 @@ func (b *Bucket) prepare() error {
 		INSERT INTO labels
 			(payload)
 				VALUES
-			(?);
+			(jsonb(?));
 	`)
 	if err != nil {
 		return fmt.Errorf("could not prepare insert %q: %w", filename, err)

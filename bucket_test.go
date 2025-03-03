@@ -23,7 +23,8 @@ var _ = Describe("Buckets", func() {
 
 	When("there is one bucket", func() {
 		It("only creates file at a time", func() {
-			buckets := loge.NewBuckets(1, 1, outputPath)
+			buckets, err := loge.NewBuckets(1, 1, outputPath)
+			Expect(err).NotTo(HaveOccurred())
 			buckets.Append(createPayload(1, 1))
 
 			Eventually(func() int {
@@ -41,7 +42,8 @@ var _ = Describe("Buckets", func() {
 
 		It("creates data that can be searched", func() {
 			payload := createPayload(1, 1)
-			buckets := loge.NewBuckets(1, 1, outputPath)
+			buckets, err := loge.NewBuckets(1, 1, outputPath)
+			Expect(err).NotTo(HaveOccurred())
 			buckets.Append(payload)
 
 			Eventually(func() int {
@@ -83,7 +85,8 @@ var _ = Describe("Buckets", func() {
 	})
 
 	DescribeTable("When creating files", func(bucketSize, payloadSize, values, expectedFiles int) {
-		buckets := loge.NewBuckets(bucketSize, payloadSize, outputPath)
+		buckets, err := loge.NewBuckets(bucketSize, payloadSize, outputPath)
+		Expect(err).NotTo(HaveOccurred())
 
 		for range values {
 			buckets.Append(createPayload(1, 1))

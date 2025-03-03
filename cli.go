@@ -30,7 +30,10 @@ func (c *CLI) Run() error {
 	}
 	defer manager.Close()
 
-	buckets := NewBuckets(c.Buckets, c.PayloadSize, c.OutputPath)
+	buckets, err := NewBuckets(c.Buckets, c.PayloadSize, c.OutputPath)
+	if err != nil {
+		return fmt.Errorf("could not create buckets: %w", err)
+	}
 
 	router := echo.New()
 	router.Use(middleware.Recover())

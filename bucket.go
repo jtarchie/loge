@@ -42,11 +42,15 @@ func NewBuckets(
 	size int,
 	payloadSize int,
 	outputPath string,
-) *Buckets {
+) (*Buckets, error) {
 	buckets := make([]*Bucket, 0, size)
 
 	for index := range size {
-		buckets = append(buckets, NewBucket(payloadSize, outputPath, fmt.Sprintf("bucket-%d", index)))
+		bucket, err := NewBucket(payloadSize, outputPath, fmt.Sprintf("bucket-%d", index))
+		if err != nil {
+			return nil, fmt.Errorf("could not create bucket: %w", err)
+		}
+		buckets = append(buckets, bucket)
 	}
 
 	workers := worker.New(payloadSize, size, func(index int, payload *Payload) {
@@ -59,7 +63,7 @@ func NewBuckets(
 	return &Buckets{
 		buckets: buckets,
 		workers: workers,
-	}
+	}, nil
 }
 
 func (b *Buckets) Append(payload *Payload) {
@@ -70,22 +74,22 @@ func NewBucket(
 	payloadSize int,
 	outputDir string,
 	prefix string,
-) *Bucket {
-	return &Bucket{
+) (*Bucket, error) {
+	bucket := &Bucket{
 		outputDir:      outputDir,
 		maxPayloadSize: payloadSize,
 		prefix:         prefix,
 	}
+
+	err := bucket.prepare()
+	if err != nil {
+		return nil, fmt.Errorf("could not prepare bucket: %w", err)
+	}
+
+	return bucket, nil
 }
 
 func (b *Bucket) Append(payload *Payload) error {
-	if b.client == nil {
-		err := b.prepare()
-		if err != nil {
-			return fmt.Errorf("could not start database: %w", err)
-		}
-	}
-
 	for _, stream := range payload.Streams {
 		resultLabel, err := b.insertLabels.Exec(MarshalLabels(stream.Stream))
 		if err != nil {
@@ -217,6 +221,7 @@ func (b *Bucket) flush() error {
 
 		b.minTimestamp = math.MaxInt64
 		b.maxTimestamp = math.MinInt64
+		_ = b.prepare()
 	}()
 
 	err := b.transaction.Commit()

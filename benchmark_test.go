@@ -22,7 +22,10 @@ func BenchmarkLocalManager(b *testing.B) {
 	}
 	defer manager.Close()
 
-	buckets := loge.NewBuckets(10, 100, outputPath)
+	buckets, err := loge.NewBuckets(10, 100, outputPath)
+	if err != nil {
+		b.Fatalf("could not create buckets: %s", err)
+	}
 
 	for tagIndex := range 1_000 {
 		payload := createPayload(1, 1)

@@ -23,7 +23,8 @@ var _ = Describe("Local", func() {
 	})
 
 	It("returns all the labels", func() {
-		buckets := loge.NewBuckets(1, 5, outputPath)
+		buckets, err := loge.NewBuckets(1, 5, outputPath)
+		Expect(err).NotTo(HaveOccurred())
 
 		for i := range 5 {
 			payload := &loge.Payload{

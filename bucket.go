@@ -35,7 +35,7 @@ type Bucket struct {
 
 type Buckets struct {
 	buckets []*Bucket
-	workers *worker.Worker[*Payload]
+	workers *worker.Worker[Payload]
 }
 
 func NewBuckets(
@@ -53,7 +53,7 @@ func NewBuckets(
 		buckets = append(buckets, bucket)
 	}
 
-	workers := worker.New(payloadSize, size, func(index int, payload *Payload) {
+	workers := worker.New(payloadSize, size, func(index int, payload Payload) {
 		err := buckets[index-1].Append(payload)
 		if err != nil {
 			slog.Error("could not append to bucket", slog.Int("index", index), slog.String("error", err.Error()))
@@ -66,7 +66,7 @@ func NewBuckets(
 	}, nil
 }
 
-func (b *Buckets) Append(payload *Payload) {
+func (b *Buckets) Append(payload Payload) {
 	_ = b.workers.Enqueue(payload)
 }
 
@@ -89,7 +89,7 @@ func NewBucket(
 	return bucket, nil
 }
 
-func (b *Bucket) Append(payload *Payload) error {
+func (b *Bucket) Append(payload Payload) error {
 	for _, stream := range payload.Streams {
 		resultLabel, err := b.insertLabels.Exec(MarshalLabels(stream.Stream))
 		if err != nil {

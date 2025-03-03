@@ -27,9 +27,9 @@ var _ = Describe("Local", func() {
 		Expect(err).NotTo(HaveOccurred())
 
 		for i := range 5 {
-			payload := &loge.Payload{
+			payload := loge.Payload{
 				Streams: loge.Streams{
-					{
+					loge.Entry{
 						Stream: loge.Stream{fmt.Sprintf("tag_%d", i): "value"},
 						Values: loge.Values{
 							loge.Value{"", ""},

@@ -16,8 +16,8 @@ func TestLoge(t *testing.T) {
 	RunSpecs(t, "Loge Suite")
 }
 
-func createPayload(streams int, values int) *loge.Payload {
-	payload := &loge.Payload{
+func createPayload(streams int, values int) loge.Payload {
+	payload := loge.Payload{
 		Streams: make(loge.Streams, streams),
 	}
 

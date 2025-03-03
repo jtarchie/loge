@@ -41,9 +41,9 @@ func (c *CLI) Run() error {
 	router.JSONSerializer = DefaultJSONSerializer{}
 
 	router.POST("/api/v1/push", func(context echo.Context) error {
-		payload := &Payload{}
+		payload := Payload{}
 
-		err := bind(context, payload)
+		err := bind(context, &payload)
 		if err != nil {
 			return fmt.Errorf("could not bind payload: %w", err)
 		}

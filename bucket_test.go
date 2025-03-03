@@ -24,7 +24,7 @@ var _ = Describe("Buckets", func() {
 	When("there is one bucket", func() {
 		It("only creates file at a time", func() {
 			buckets := loge.NewBuckets(1, 1, outputPath)
-			buckets.Append(oneValue)
+			buckets.Append(createPayload(1, 1))
 
 			Eventually(func() int {
 				matches, _ := filepath.Glob(filepath.Join(outputPath, "*.sqlite.zst"))
@@ -40,8 +40,9 @@ var _ = Describe("Buckets", func() {
 		})
 
 		It("creates data that can be searched", func() {
+			payload := createPayload(1, 1)
 			buckets := loge.NewBuckets(1, 1, outputPath)
-			buckets.Append(oneValue)
+			buckets.Append(payload)
 
 			Eventually(func() int {
 				matches, _ := filepath.Glob(filepath.Join(outputPath, "*.sqlite.zst"))
@@ -69,6 +70,15 @@ var _ = Describe("Buckets", func() {
 			err = dbClient.QueryRow("SELECT COUNT(*) FROM search WHERE search MATCH 'tag'").Scan(&count)
 			Expect(err).NotTo(HaveOccurred())
 			Expect(count).To(BeNumerically(">=", 1))
+
+			var value string
+			err = dbClient.QueryRow("SELECT value FROM metadata WHERE key = 'minTimestamp'").Scan(&value)
+			Expect(err).NotTo(HaveOccurred())
+			Expect(value).To(Equal(payload.Streams[0].Values[0][0]))
+
+			err = dbClient.QueryRow("SELECT value FROM metadata WHERE key = 'maxTimestamp'").Scan(&value)
+			Expect(err).NotTo(HaveOccurred())
+			Expect(value).To(Equal(payload.Streams[0].Values[0][0]))
 		})
 	})
 
@@ -76,7 +86,7 @@ var _ = Describe("Buckets", func() {
 		buckets := loge.NewBuckets(bucketSize, payloadSize, outputPath)
 
 		for range values {
-			buckets.Append(oneValue)
+			buckets.Append(createPayload(1, 1))
 		}
 
 		Eventually(func() int {

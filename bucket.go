@@ -143,6 +143,11 @@ func (b *Bucket) prepare() error {
 			label_id INTEGER
 		) STRICT;
 
+		CREATE TABLE metadata (
+			key TEXT PRIMARY KEY,
+			value TEXT
+		) STRICT;
+
 		CREATE VIRTUAL TABLE stream_tree USING rtree(
 			id,
 			minTimestamp, maxTimestamp
@@ -227,6 +232,8 @@ func (b *Bucket) flush() error {
 			payload;
 
 		INSERT INTO stream_tree (id, minTimestamp, maxTimestamp) SELECT id, timestamp, timestamp FROM streams;
+		INSERT INTO metadata (key, value) VALUES ('minTimestamp', (SELECT printf('%u', MIN(timestamp)) FROM streams));
+		INSERT INTO metadata (key, value) VALUES ('maxTimestamp', (SELECT printf('%u', MAX(timestamp)) FROM streams));
 		
 		INSERT INTO
 			search(search)

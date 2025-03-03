@@ -1,7 +1,9 @@
 package loge_test
 
 import (
+	"strconv"
 	"testing"
+	"time"
 
 	"github.com/jtarchie/loge"
 	_ "github.com/mattn/go-sqlite3"
@@ -14,14 +16,26 @@ func TestLoge(t *testing.T) {
 	RunSpecs(t, "Loge Suite")
 }
 
-// nolint: gochecknoglobals
-var oneValue = &loge.Payload{
-	Streams: loge.Streams{
-		{
+func createPayload(streams int, values int) *loge.Payload {
+	payload := &loge.Payload{
+		Streams: make(loge.Streams, streams),
+	}
+
+	for i := 0; i < streams; i++ {
+		payload.Streams[i] = loge.Entry{
 			Stream: loge.Stream{"tag": "value"},
-			Values: loge.Values{
-				loge.Value{"", ""},
-			},
-		},
-	},
+			Values: make(loge.Values, values),
+		}
+
+		for j := 0; j < values; j++ {
+			// timestamps in nanoseconds as a string
+			timestamp := strconv.FormatInt(time.Now().UnixNano(), 10)
+			payload.Streams[i].Values[j] = loge.Value{
+				timestamp,
+				"",
+			}
+		}
+	}
+
+	return payload
 }

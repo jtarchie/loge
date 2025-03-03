@@ -22,14 +22,16 @@ func createPayload(streams int, values int) *loge.Payload {
 	}
 
 	for i := 0; i < streams; i++ {
+		timestamp := strconv.FormatInt(time.Now().UnixNano(), 10)
+
 		payload.Streams[i] = loge.Entry{
-			Stream: loge.Stream{"tag": "value"},
+			Stream: loge.Stream{("tag_" + timestamp): "value"},
 			Values: make(loge.Values, values),
 		}
 
 		for j := 0; j < values; j++ {
 			// timestamps in nanoseconds as a string
-			timestamp := strconv.FormatInt(time.Now().UnixNano(), 10)
+
 			payload.Streams[i].Values[j] = loge.Value{
 				timestamp,
 				"",

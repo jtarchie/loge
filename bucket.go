@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"io"
 	"log/slog"
+	"math"
 	"os"
 	"path/filepath"
 	"sync/atomic"
@@ -22,6 +23,9 @@ type Bucket struct {
 	insertStream *sql.Stmt
 	insertLabels *sql.Stmt
 	filename     string
+
+	minTimestamp int64
+	maxTimestamp int64
 
 	maxPayloadSize int
 	payloadSize    atomic.Int64
@@ -91,10 +95,15 @@ func (b *Bucket) Append(payload *Payload) error {
 		labelID, _ := resultLabel.LastInsertId()
 
 		for _, value := range stream.Values {
-			_, err := b.insertStream.Exec(value.Timestamp(), value[1], labelID)
+			timestamp := value.Timestamp()
+
+			_, err := b.insertStream.Exec(timestamp, value[1], labelID)
 			if err != nil {
 				return fmt.Errorf("could not insert %q: %w", b.filename, err)
 			}
+
+			b.minTimestamp = min(b.minTimestamp, timestamp)
+			b.maxTimestamp = max(b.maxTimestamp, timestamp)
 		}
 	}
 
@@ -188,6 +197,9 @@ func (b *Bucket) prepare() error {
 	b.insertLabels = insertLabels
 	b.filename = filename
 
+	b.minTimestamp = math.MaxInt64
+	b.maxTimestamp = math.MinInt64
+
 	return nil
 }
 
@@ -202,11 +214,24 @@ func (b *Bucket) flush() error {
 		b.transaction = nil
 		b.insertStream = nil
 		b.insertLabels = nil
+
+		b.minTimestamp = math.MaxInt64
+		b.maxTimestamp = math.MinInt64
 	}()
 
 	err := b.transaction.Commit()
 	if err != nil {
 		return fmt.Errorf("could not commit transaction %q: %w", b.filename, err)
+	}
+
+	_, err = b.client.Exec(`INSERT INTO metadata (key, value) VALUES ('minTimestamp', ?);`, b.minTimestamp)
+	if err != nil {
+		return fmt.Errorf("could not insert minTimestamp %q: %w", b.filename, err)
+	}
+
+	_, err = b.client.Exec(`INSERT INTO metadata (key, value) VALUES ('maxTimestamp', ?);`, b.maxTimestamp)
+	if err != nil {
+		return fmt.Errorf("could not insert maxTimestamp %q: %w", b.filename, err)
 	}
 
 	_, err = b.client.Exec(`
@@ -232,8 +257,6 @@ func (b *Bucket) flush() error {
 			payload;
 
 		INSERT INTO stream_tree (id, minTimestamp, maxTimestamp) SELECT id, timestamp, timestamp FROM streams;
-		INSERT INTO metadata (key, value) VALUES ('minTimestamp', (SELECT printf('%u', MIN(timestamp)) FROM streams));
-		INSERT INTO metadata (key, value) VALUES ('maxTimestamp', (SELECT printf('%u', MAX(timestamp)) FROM streams));
 		
 		INSERT INTO
 			search(search)

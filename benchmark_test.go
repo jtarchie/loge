@@ -1,7 +1,6 @@
 package loge_test
 
 import (
-	"fmt"
 	"os"
 	"testing"
 	"time"
@@ -26,16 +25,7 @@ func BenchmarkLocalManager(b *testing.B) {
 	buckets := loge.NewBuckets(10, 100, outputPath)
 
 	for tagIndex := range 1_000 {
-		payload := &loge.Payload{
-			Streams: loge.Streams{
-				{
-					Stream: loge.Stream{fmt.Sprintf("tag_%d", tagIndex): "value"},
-					Values: loge.Values{
-						loge.Value{"", ""},
-					},
-				},
-			},
-		}
+		payload := createPayload(1, 1)
 
 		_, valid := payload.Valid()
 		if !valid {

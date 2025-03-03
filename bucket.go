@@ -142,6 +142,11 @@ func (b *Bucket) prepare() error {
 			-- no constraint is enforced
 			label_id INTEGER
 		) STRICT;
+
+		CREATE VIRTUAL TABLE stream_tree USING rtree(
+			id,
+			minTimestamp, maxTimestamp
+		);
 	`)
 	if err != nil {
 		return fmt.Errorf("could not create schema %q: %w", filename, err)
@@ -220,6 +225,8 @@ func (b *Bucket) flush() error {
 			GROUP_CONCAT(kv, ' ')
 		FROM
 			payload;
+
+		INSERT INTO stream_tree (id, minTimestamp, maxTimestamp) SELECT id, timestamp, timestamp FROM streams;
 		
 		INSERT INTO
 			search(search)

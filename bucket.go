@@ -8,7 +8,6 @@ import (
 	"math"
 	"os"
 	"path/filepath"
-	"sync/atomic"
 	"time"
 
 	seekable "github.com/SaveTheRbtz/zstd-seekable-format-go/pkg"
@@ -17,94 +16,68 @@ import (
 	_ "github.com/mattn/go-sqlite3"
 )
 
-type Bucket struct {
-	outputDir   string
-	payloads    []Payload
-	payloadSize atomic.Int64
-	prefix      string
+type Buckets struct {
+	receiver chan Payload
 }
 
-type Buckets struct {
-	workers *worker.Worker[Payload]
-}
+const interval = 5 * time.Second
 
 func NewBuckets(
 	size int,
 	payloadSize int,
 	outputPath string,
 ) (*Buckets, error) {
-	buckets := make([]*Bucket, 0, size)
+	receiver := make(chan Payload, size)
 
-	for index := range size {
-		bucket, err := NewBucket(outputPath, fmt.Sprintf("bucket-%d", index))
-		if err != nil {
-			return nil, fmt.Errorf("could not create bucket: %w", err)
-		}
-		buckets = append(buckets, bucket)
-	}
-
-	compressors := worker.New(size*10, 1, func(_ int, filename string) {
+	compressors := worker.New(size, 1, func(_ int, filename string) {
 		err := compress(filename)
 		if err != nil {
 			slog.Error("could not compress file", slog.String("filename", filename), slog.String("error", err.Error()))
 		}
 	})
 
-	flushers := worker.New(size, max(size/2, 1), func(index int, payloads []Payload) {
+	flushers := worker.New(size, max(size/2, 2), func(index int, payloads []Payload) {
 		filename, err := flusher(payloads, outputPath, fmt.Sprintf("bucket-%d", index))
 		if err != nil {
 			slog.Error("could not flush payloads", slog.Int("index", index), slog.String("error", err.Error()))
+		} else {
+			compressors.Enqueue(filename)
 		}
-
-		compressors.Enqueue(filename)
 	})
 
-	workers := worker.New(payloadSize, size, func(index int, payload Payload) {
-		bucket := buckets[index-1]
-		err := bucket.Append(payload)
-		if err != nil {
-			slog.Error("could not append to bucket", slog.Int("index", index), slog.String("error", err.Error()))
-		}
+	for index := range size {
+		go func(index int) {
+			payloads := make([]Payload, 0, payloadSize)
+			timer := time.NewTimer(interval)
 
-		if bucket.Length() >= int64(payloadSize) {
-			if flushers.Enqueue(bucket.payloads, worker.WithTimeout(time.Millisecond)) {
-				bucket.payloads = []Payload{}
-				bucket.payloadSize.Store(0)
+			for {
+				select {
+				case <-timer.C:
+					if len(payloads) > 0 && flushers.Enqueue(payloads, worker.WithTimeout(time.Millisecond)) {
+						payloads = make([]Payload, 0, payloadSize)
+						timer.Reset(interval)
+					}
+				case payload := <-receiver:
+					payloads = append(payloads, payload)
+					timer.Reset(interval)
+
+					if len(payloads) >= payloadSize {
+						if flushers.Enqueue(payloads, worker.WithTimeout(time.Millisecond)) {
+							payloads = make([]Payload, 0, payloadSize)
+						}
+					}
+				}
 			}
-		}
-	})
+		}(index)
+	}
 
 	return &Buckets{
-		workers: workers,
+		receiver: receiver,
 	}, nil
 }
 
 func (b *Buckets) Append(payload Payload) {
-	_ = b.workers.Enqueue(payload)
-}
-
-func NewBucket(
-	outputDir string,
-	prefix string,
-) (*Bucket, error) {
-	bucket := &Bucket{
-		outputDir: outputDir,
-		payloads:  []Payload{},
-		prefix:    prefix,
-	}
-
-	return bucket, nil
-}
-
-func (b *Bucket) Append(payload Payload) error {
-	b.payloads = append(b.payloads, payload)
-	b.payloadSize.Add(1)
-
-	return nil
-}
-
-func (b *Bucket) Length() int64 {
-	return b.payloadSize.Load()
+	b.receiver <- payload
 }
 
 func flusher(payloads []Payload, outputDir string, prefix string) (string, error) {
@@ -239,12 +212,13 @@ func flusher(payloads []Payload, outputDir string, prefix string) (string, error
 			id,
 			GROUP_CONCAT(kv, ' ')
 		FROM
-			payload;
+			payload
+		GROUP BY id;
 
 		INSERT INTO stream_tree (id, minTimestamp, maxTimestamp) SELECT id, timestamp, timestamp FROM streams;
 	`)
 	if err != nil {
-		return "", fmt.Errorf("could not optimize %q: %w", filename, err)
+		return "", fmt.Errorf("could not create metadata %q: %w", filename, err)
 	}
 
 	err = transaction.Commit()

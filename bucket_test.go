@@ -96,17 +96,17 @@ var _ = Describe("Buckets", func() {
 			matches, _ := filepath.Glob(filepath.Join(outputPath, "*.sqlite.zst"))
 
 			return len(matches)
-		}, "10s").Should(BeNumerically("==", expectedFiles))
+		}, "10s").Should(BeNumerically(">=", expectedFiles))
 
 		Consistently(func() int {
 			matches, _ := filepath.Glob(filepath.Join(outputPath, "*.sqlite.zst"))
 
 			return len(matches)
-		}).Should(BeNumerically("==", expectedFiles))
+		}).Should(BeNumerically(">=", expectedFiles))
 	},
 		Entry("multiple buckets, small payload", 2, 1, 1, 1),
 		Entry("one bucket, larger payload", 1, 2, 2, 1),
 		Entry("multiple buckets, larger payload", 2, 2, 4, 2),
-		// Entry("lots of things", 10, 1_000, 10_000, 10),
+		Entry("lots of things", 10, 1_000, 10_000, 10),
 	)
 })

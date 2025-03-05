@@ -18,23 +18,13 @@ import (
 )
 
 type Bucket struct {
-	client       *sql.DB
-	transaction  *sql.Tx
-	insertStream *sql.Stmt
-	insertLabels *sql.Stmt
-	filename     string
-
-	minTimestamp int64
-	maxTimestamp int64
-
-	maxPayloadSize int
-	payloadSize    atomic.Int64
-	outputDir      string
-	prefix         string
+	outputDir   string
+	payloads    []Payload
+	payloadSize atomic.Int64
+	prefix      string
 }
 
 type Buckets struct {
-	buckets []*Bucket
 	workers *worker.Worker[Payload]
 }
 
@@ -46,22 +36,45 @@ func NewBuckets(
 	buckets := make([]*Bucket, 0, size)
 
 	for index := range size {
-		bucket, err := NewBucket(payloadSize, outputPath, fmt.Sprintf("bucket-%d", index))
+		bucket, err := NewBucket(outputPath, fmt.Sprintf("bucket-%d", index))
 		if err != nil {
 			return nil, fmt.Errorf("could not create bucket: %w", err)
 		}
 		buckets = append(buckets, bucket)
 	}
 
+	compressors := worker.New(size*10, 1, func(_ int, filename string) {
+		err := compress(filename)
+		if err != nil {
+			slog.Error("could not compress file", slog.String("filename", filename), slog.String("error", err.Error()))
+		}
+	})
+
+	flushers := worker.New(size, max(size/2, 1), func(index int, payloads []Payload) {
+		filename, err := flusher(payloads, outputPath, fmt.Sprintf("bucket-%d", index))
+		if err != nil {
+			slog.Error("could not flush payloads", slog.Int("index", index), slog.String("error", err.Error()))
+		}
+
+		compressors.Enqueue(filename)
+	})
+
 	workers := worker.New(payloadSize, size, func(index int, payload Payload) {
-		err := buckets[index-1].Append(payload)
+		bucket := buckets[index-1]
+		err := bucket.Append(payload)
 		if err != nil {
 			slog.Error("could not append to bucket", slog.Int("index", index), slog.String("error", err.Error()))
+		}
+
+		if bucket.Length() >= int64(payloadSize) {
+			if flushers.Enqueue(bucket.payloads, worker.WithTimeout(time.Millisecond)) {
+				bucket.payloads = []Payload{}
+				bucket.payloadSize.Store(0)
+			}
 		}
 	})
 
 	return &Buckets{
-		buckets: buckets,
 		workers: workers,
 	}, nil
 }
@@ -71,72 +84,44 @@ func (b *Buckets) Append(payload Payload) {
 }
 
 func NewBucket(
-	payloadSize int,
 	outputDir string,
 	prefix string,
 ) (*Bucket, error) {
 	bucket := &Bucket{
-		outputDir:      outputDir,
-		maxPayloadSize: payloadSize,
-		prefix:         prefix,
-	}
-
-	err := bucket.prepare()
-	if err != nil {
-		return nil, fmt.Errorf("could not prepare bucket: %w", err)
+		outputDir: outputDir,
+		payloads:  []Payload{},
+		prefix:    prefix,
 	}
 
 	return bucket, nil
 }
 
 func (b *Bucket) Append(payload Payload) error {
-	for _, stream := range payload.Streams {
-		resultLabel, err := b.insertLabels.Exec(MarshalLabels(stream.Stream))
-		if err != nil {
-			return fmt.Errorf("could not insert %q: %w", b.filename, err)
-		}
-
-		labelID, _ := resultLabel.LastInsertId()
-
-		for _, value := range stream.Values {
-			timestamp := value.Timestamp()
-
-			_, err := b.insertStream.Exec(timestamp, value[1], labelID)
-			if err != nil {
-				return fmt.Errorf("could not insert %q: %w", b.filename, err)
-			}
-
-			b.minTimestamp = min(b.minTimestamp, timestamp)
-			b.maxTimestamp = max(b.maxTimestamp, timestamp)
-		}
-	}
-
+	b.payloads = append(b.payloads, payload)
 	b.payloadSize.Add(1)
-
-	if b.payloadSize.Load() >= int64(b.maxPayloadSize) {
-		err := b.flush()
-		if err != nil {
-			return fmt.Errorf("could not flush %q: %w", b.filename, err)
-		}
-
-		b.payloadSize.Store(0)
-	}
 
 	return nil
 }
 
-func (b *Bucket) prepare() error {
-	filename := filepath.Join(b.outputDir, fmt.Sprintf("%s-%d.sqlite", b.prefix, time.Now().UnixNano()))
+func (b *Bucket) Length() int64 {
+	return b.payloadSize.Load()
+}
 
-	err := os.MkdirAll(b.outputDir, os.ModePerm)
+func flusher(payloads []Payload, outputDir string, prefix string) (string, error) {
+	filename := filepath.Join(outputDir, fmt.Sprintf("%s-%d.sqlite", prefix, time.Now().UnixNano()))
+
+	err := os.MkdirAll(outputDir, os.ModePerm)
 	if err != nil {
-		return fmt.Errorf("could not create directory: %w", err)
+		return "", fmt.Errorf("could not create directory: %w", err)
 	}
 
 	client, err := sql.Open("sqlite3", filename)
 	if err != nil {
-		return fmt.Errorf("could not open sqlite3 %q: %w", filename, err)
+		return "", fmt.Errorf("could not open sqlite3 %q: %w", filename, err)
 	}
+	defer func() {
+		_ = client.Close()
+	}()
 
 	_, err = client.Exec(`
 		CREATE TABLE labels (
@@ -167,13 +152,16 @@ func (b *Bucket) prepare() error {
 		);
 	`)
 	if err != nil {
-		return fmt.Errorf("could not create schema %q: %w", filename, err)
+		return "", fmt.Errorf("could not create schema %q: %w", filename, err)
 	}
 
 	transaction, err := client.Begin()
 	if err != nil {
-		return fmt.Errorf("could not create transaction %q: %w", filename, err)
+		return "", fmt.Errorf("could not create transaction %q: %w", filename, err)
 	}
+	defer func() {
+		_ = transaction.Rollback()
+	}()
 
 	insertStream, err := transaction.Prepare(`
 		INSERT INTO streams
@@ -182,7 +170,7 @@ func (b *Bucket) prepare() error {
 			(?, ?, ?);
 	`)
 	if err != nil {
-		return fmt.Errorf("could not prepare insert %q: %w", filename, err)
+		return "", fmt.Errorf("could not prepare insert %q: %w", filename, err)
 	}
 
 	insertLabels, err := transaction.Prepare(`
@@ -192,54 +180,46 @@ func (b *Bucket) prepare() error {
 			(jsonb(?));
 	`)
 	if err != nil {
-		return fmt.Errorf("could not prepare insert %q: %w", filename, err)
+		return "", fmt.Errorf("could not prepare insert %q: %w", filename, err)
 	}
 
-	b.client = client
-	b.transaction = transaction
-	b.insertStream = insertStream
-	b.insertLabels = insertLabels
-	b.filename = filename
+	var minTimestamp int64 = math.MaxInt64
+	var maxTimestamp int64 = math.MinInt64
 
-	b.minTimestamp = math.MaxInt64
-	b.maxTimestamp = math.MinInt64
+	for _, payload := range payloads {
+		for _, stream := range payload.Streams {
+			resultLabel, err := insertLabels.Exec(MarshalLabels(stream.Stream))
+			if err != nil {
+				return "", fmt.Errorf("could not insert %q: %w", filename, err)
+			}
 
-	return nil
-}
+			labelID, _ := resultLabel.LastInsertId()
 
-func (b *Bucket) flush() error {
-	defer func() {
-		b.insertStream.Close()
-		b.insertLabels.Close()
-		_ = b.transaction.Rollback()
-		b.client.Close()
+			for _, value := range stream.Values {
+				timestamp := value.Timestamp()
 
-		b.client = nil
-		b.transaction = nil
-		b.insertStream = nil
-		b.insertLabels = nil
+				_, err := insertStream.Exec(timestamp, value[1], labelID)
+				if err != nil {
+					return "", fmt.Errorf("could not insert %q: %w", filename, err)
+				}
 
-		b.minTimestamp = math.MaxInt64
-		b.maxTimestamp = math.MinInt64
-		_ = b.prepare()
-	}()
+				minTimestamp = min(minTimestamp, timestamp)
+				maxTimestamp = max(maxTimestamp, timestamp)
+			}
+		}
+	}
 
-	err := b.transaction.Commit()
+	_, err = transaction.Exec(`INSERT INTO metadata (key, value) VALUES ('minTimestamp', ?);`, minTimestamp)
 	if err != nil {
-		return fmt.Errorf("could not commit transaction %q: %w", b.filename, err)
+		return "", fmt.Errorf("could not insert minTimestamp %q: %w", filename, err)
 	}
 
-	_, err = b.client.Exec(`INSERT INTO metadata (key, value) VALUES ('minTimestamp', ?);`, b.minTimestamp)
+	_, err = transaction.Exec(`INSERT INTO metadata (key, value) VALUES ('maxTimestamp', ?);`, maxTimestamp)
 	if err != nil {
-		return fmt.Errorf("could not insert minTimestamp %q: %w", b.filename, err)
+		return "", fmt.Errorf("could not insert maxTimestamp %q: %w", filename, err)
 	}
 
-	_, err = b.client.Exec(`INSERT INTO metadata (key, value) VALUES ('maxTimestamp', ?);`, b.maxTimestamp)
-	if err != nil {
-		return fmt.Errorf("could not insert maxTimestamp %q: %w", b.filename, err)
-	}
-
-	_, err = b.client.Exec(`
+	_, err = transaction.Exec(`
 		CREATE VIRTUAL TABLE
 			search
 		USING
@@ -262,35 +242,49 @@ func (b *Bucket) flush() error {
 			payload;
 
 		INSERT INTO stream_tree (id, minTimestamp, maxTimestamp) SELECT id, timestamp, timestamp FROM streams;
-		
-		INSERT INTO
-			search(search)
-		VALUES
-			('optimize');
-
-		vacuum;
-		pragma optimize;
 	`)
 	if err != nil {
-		return fmt.Errorf("could not optimize %q: %w", b.filename, err)
+		return "", fmt.Errorf("could not optimize %q: %w", filename, err)
 	}
 
-	err = b.client.Close()
+	err = transaction.Commit()
 	if err != nil {
-		return fmt.Errorf("could not close sqlite: %w", err)
+		return "", fmt.Errorf("could not commit transaction %q: %w", filename, err)
 	}
 
-	output, err := os.Create(b.filename + ".zst.partial")
+	_, err = client.Exec(`
+			INSERT INTO
+				search(search)
+			VALUES
+				('optimize');
+
+			vacuum;
+			pragma optimize;
+	`)
+	if err != nil {
+		return "", fmt.Errorf("could not optimize %q: %w", filename, err)
+	}
+
+	err = client.Close()
+	if err != nil {
+		return "", fmt.Errorf("could not close sqlite: %w", err)
+	}
+
+	return filename, nil
+}
+
+func compress(filename string) error {
+	output, err := os.Create(filename + ".zst.partial")
 	if err != nil {
 		return fmt.Errorf("could not create file: %w", err)
 	}
 
 	defer func() {
 		_ = output.Close()
-		_ = os.Rename(b.filename+".zst.partial", b.filename+".zst")
+		_ = os.Rename(filename+".zst.partial", filename+".zst")
 	}()
 
-	input, err := os.Open(b.filename)
+	input, err := os.Open(filename)
 	if err != nil {
 		return fmt.Errorf("could not create file: %w", err)
 	}
@@ -313,7 +307,7 @@ func (b *Bucket) flush() error {
 		return fmt.Errorf("could not compress file: %w", err)
 	}
 
-	err = os.Remove(b.filename)
+	err = os.Remove(filename)
 	if err != nil {
 		return fmt.Errorf("could not remove original file: %w", err)
 	}

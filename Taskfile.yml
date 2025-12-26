@@ -8,6 +8,7 @@ tasks:
   lint: golangci-lint run --fix --timeout "10m"
   test: go run github.com/onsi/ginkgo/v2/ginkgo -tags fts5 -cover -race -r
   server: go run -tags fts5 loge/main.go --port 6500 --payload-size 100000 --buckets 2
+  server-drop: go run -tags fts5 loge/main.go --port 6500 --payload-size 100000 --buckets 2 --drop-on-backpressure
   proto:
     desc: Generate protobuf Go code
     cmds:
@@ -32,6 +33,9 @@ tasks:
       # Function to start server and wait for it to be ready
       start_server() {
         rm -Rf tmp/
+        # Kill any existing processes on port 6500
+        lsof -ti:6500 | xargs kill -9 2>/dev/null || true
+        sleep 1
         /tmp/loge-bench --port 6500 --payload-size 100000 --buckets 2 &
         SERVER_PID=$!
         echo "Started server with PID $SERVER_PID"
@@ -55,9 +59,17 @@ tasks:
         if [ -n "$SERVER_PID" ]; then
           echo "Stopping server (PID $SERVER_PID) and waiting for flush..."
           kill -TERM $SERVER_PID 2>/dev/null || true
-          # Wait for graceful shutdown (server flushes all pending data)
-          wait $SERVER_PID 2>/dev/null || true
-          echo "Server stopped and flushed."
+          # Wait for process to exit with timeout
+          for i in $(seq 1 60); do
+            if ! kill -0 $SERVER_PID 2>/dev/null; then
+              echo "Server stopped and flushed."
+              SERVER_PID=""
+              return 0
+            fi
+            sleep 1
+          done
+          echo "Server did not exit within 60s, force killing..."
+          kill -9 $SERVER_PID 2>/dev/null || true
           sleep 1
         fi
         SERVER_PID=""
@@ -95,3 +107,87 @@ tasks:
       
       echo ""
       echo "All benchmarks complete!"
+  bench-drop:
+    desc: Run benchmarks with drop-on-backpressure enabled (faster, may lose data)
+    cmds:
+    - rm -Rf tmp/
+    - go test -tags fts5 -bench=. -benchmem -run ^$
+    - go build -tags fts5 -o /tmp/loge-bench ./loge/main.go
+    - |
+      # Function to start server with drop-on-backpressure
+      start_server() {
+        rm -Rf tmp/
+        # Kill any existing processes on port 6500
+        lsof -ti:6500 | xargs kill -9 2>/dev/null || true
+        sleep 1
+        /tmp/loge-bench --port 6500 --payload-size 100000 --buckets 2 --drop-on-backpressure &
+        SERVER_PID=$!
+        echo "Started server (drop mode) with PID $SERVER_PID"
+        
+        echo "Waiting for server to be ready..."
+        for i in $(seq 1 30); do
+          if nc -z localhost 6500 2>/dev/null; then
+            echo "Server is ready!"
+            return 0
+          fi
+          if [ $i -eq 30 ]; then
+            echo "Server failed to start within 30 seconds"
+            return 1
+          fi
+          sleep 1
+        done
+      }
+      
+      # Function to stop server
+      stop_server() {
+        if [ -n "$SERVER_PID" ]; then
+          echo "Stopping server (PID $SERVER_PID)..."
+          kill -TERM $SERVER_PID 2>/dev/null || true
+          # Wait for process to exit with timeout
+          for i in $(seq 1 60); do
+            if ! kill -0 $SERVER_PID 2>/dev/null; then
+              echo "Server stopped."
+              SERVER_PID=""
+              return 0
+            fi
+            sleep 1
+          done
+          echo "Server did not exit within 60s, force killing..."
+          kill -9 $SERVER_PID 2>/dev/null || true
+          sleep 1
+        fi
+        SERVER_PID=""
+      }
+      
+      # Cleanup on exit
+      trap stop_server EXIT
+      
+      # Run msgpack benchmark
+      echo ""
+      echo "=========================================="
+      echo "Running msgpack benchmark (drop mode)..."
+      echo "=========================================="
+      start_server || exit 1
+      k6 run benchmark/streams.msgpack.js
+      stop_server
+      
+      # Run JSON benchmark
+      echo ""
+      echo "=========================================="
+      echo "Running JSON benchmark (drop mode)..."
+      echo "=========================================="
+      start_server || exit 1
+      k6 run benchmark/streams.json.js
+      stop_server
+      
+      # Run protobuf benchmark
+      echo ""
+      echo "=========================================="
+      echo "Running protobuf benchmark (drop mode)..."
+      echo "=========================================="
+      start_server || exit 1
+      k6 run benchmark/streams.protobuf.js
+      stop_server
+      
+      echo ""
+      echo "All benchmarks (drop mode) complete!"

@@ -17,10 +17,11 @@ import (
 )
 
 type CLI struct {
-	Port        int    `default:"3000"  help:"start HTTP server on port"            required:""`
-	Buckets     int    `default:"8"     help:"number of buckets to fill into"       required:""`
-	PayloadSize int    `default:"10000" help:"size of the bucket payload"           required:""`
-	OutputPath  string `default:"tmp/"  help:"output path for all the sqlite files" required:""`
+	Port              int    `default:"3000"  help:"start HTTP server on port"            required:""`
+	Buckets           int    `default:"8"     help:"number of buckets to fill into"       required:""`
+	PayloadSize       int    `default:"10000" help:"size of the bucket payload"           required:""`
+	OutputPath        string `default:"tmp/"  help:"output path for all the sqlite files" required:""`
+	DropOnBackpressure bool   `default:"false" help:"drop data instead of blocking when backpressure occurs"`
 }
 
 func (c *CLI) Run() error {
@@ -37,7 +38,7 @@ func (c *CLI) Run() error {
 		_ = manager.Close()
 	}()
 
-	buckets, err := NewBuckets(c.Buckets, c.PayloadSize, c.OutputPath)
+	buckets, err := NewBuckets(c.Buckets, c.PayloadSize, c.OutputPath, c.DropOnBackpressure)
 	if err != nil {
 		return fmt.Errorf("could not create buckets: %w", err)
 	}

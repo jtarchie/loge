@@ -19,11 +19,12 @@ import (
 )
 
 type Buckets struct {
-	receiver    chan Payload
-	done        chan struct{}
-	wg          sync.WaitGroup
-	flushers    *worker.Worker[[]Payload]
-	compressors *worker.Worker[string]
+	receiver          chan Payload
+	done              chan struct{}
+	wg                sync.WaitGroup
+	flushers          *worker.Worker[[]Payload]
+	compressors       *worker.Worker[string]
+	dropOnBackpressure bool
 }
 
 const (
@@ -97,6 +98,7 @@ func NewBuckets(
 	size int,
 	payloadSize int,
 	outputPath string,
+	dropOnBackpressure bool,
 ) (*Buckets, error) {
 	// Larger buffer: size * payloadSize for better burst handling
 	receiver := make(chan Payload, size*payloadSize)
@@ -119,10 +121,11 @@ func NewBuckets(
 	})
 
 	buckets := &Buckets{
-		receiver:    receiver,
-		done:        done,
-		flushers:    flushers,
-		compressors: compressors,
+		receiver:          receiver,
+		done:              done,
+		flushers:          flushers,
+		compressors:       compressors,
+		dropOnBackpressure: dropOnBackpressure,
 	}
 
 	for index := range size {
@@ -173,7 +176,17 @@ func (b *Buckets) bucketWorker(index int, payloadSize int, flushers *worker.Work
 			)
 		}
 
-		// Final attempt: block until enqueue succeeds (no data loss)
+		// Drop mode: log and discard data instead of blocking
+		if b.dropOnBackpressure {
+			slog.Warn("flusher backpressure, dropping data",
+				slog.Int("bucket", index),
+				slog.Int("payloads", len(payloads)),
+			)
+			payloads = make([]Payload, 0, payloadSize)
+			return
+		}
+
+		// Block mode: block until enqueue succeeds (no data loss)
 		slog.Warn("flusher backpressure, blocking until flush completes",
 			slog.Int("bucket", index),
 			slog.Int("payloads", len(payloads)),
@@ -237,33 +250,16 @@ func (b *Buckets) Close() error {
 	// Signal all bucket workers to stop accepting new payloads
 	close(b.done)
 
-	// Close receiver first to ensure no more payloads can be added
+	// Close receiver to ensure no more payloads can be added
 	// and bucket workers can drain remaining items
 	close(b.receiver)
 
-	// Give bucket workers time to notice shutdown and attempt final flush
-	// Use a goroutine to close flushers/compressors after a delay if workers are stuck
-	shutdownComplete := make(chan struct{})
-	go func() {
-		b.wg.Wait()
-		close(shutdownComplete)
-	}()
+	// Wait for bucket workers to finish draining and flushing
+	// They use short timeouts during shutdown so this should complete quickly
+	b.wg.Wait()
 
-	// Wait for bucket workers with a timeout, then force progress
-	select {
-	case <-shutdownComplete:
-		// Workers finished normally
-	case <-time.After(5 * time.Second):
-		// Workers might be stuck on enqueue - close flushers to unblock them
-		slog.Warn("bucket workers stuck during shutdown, forcing flusher close")
-	}
-
-	// Close flushers - this will unblock any bucket workers stuck on Enqueue
-	// and process remaining queued items
+	// Close flushers to process any remaining queued items
 	b.flushers.Close()
-
-	// Wait for any remaining bucket workers that were unblocked
-	<-shutdownComplete
 
 	// Wait for compressors to complete all pending work
 	b.compressors.Close()

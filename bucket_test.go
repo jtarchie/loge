@@ -24,7 +24,7 @@ var _ = Describe("Buckets", func() {
 
 	When("there is one bucket", func() {
 		It("only creates file at a time", func() {
-			buckets, err := loge.NewBuckets(1, 1, outputPath)
+			buckets, err := loge.NewBuckets(1, 1, outputPath, false)
 			Expect(err).NotTo(HaveOccurred())
 			buckets.Append(createPayload(1, 1))
 
@@ -43,7 +43,7 @@ var _ = Describe("Buckets", func() {
 
 		It("creates data that can be searched", func() {
 			payload := createPayload(1, 1)
-			buckets, err := loge.NewBuckets(1, 1, outputPath)
+			buckets, err := loge.NewBuckets(1, 1, outputPath, false)
 			Expect(err).NotTo(HaveOccurred())
 			buckets.Append(payload)
 
@@ -86,7 +86,7 @@ var _ = Describe("Buckets", func() {
 	})
 
 	DescribeTable("When creating files", func(bucketSize, payloadSize, values, expectedFiles int) {
-		buckets, err := loge.NewBuckets(bucketSize, payloadSize, outputPath)
+		buckets, err := loge.NewBuckets(bucketSize, payloadSize, outputPath, false)
 		Expect(err).NotTo(HaveOccurred())
 
 		for range values {
@@ -113,7 +113,7 @@ var _ = Describe("Buckets", func() {
 
 	Describe("Graceful Shutdown", func() {
 		It("completes Close() quickly with no data", func() {
-			buckets, err := loge.NewBuckets(2, 100, outputPath)
+			buckets, err := loge.NewBuckets(2, 100, outputPath, false)
 			Expect(err).NotTo(HaveOccurred())
 
 			// Send one payload and wait a bit to ensure workers are initialized
@@ -126,7 +126,7 @@ var _ = Describe("Buckets", func() {
 		})
 
 		It("completes Close() after flushing pending data", func() {
-			buckets, err := loge.NewBuckets(2, 10, outputPath)
+			buckets, err := loge.NewBuckets(2, 10, outputPath, false)
 			Expect(err).NotTo(HaveOccurred())
 
 			// Add some data (not enough to trigger automatic flush)
@@ -149,7 +149,7 @@ var _ = Describe("Buckets", func() {
 
 		It("completes Close() under heavy load with backpressure", func() {
 			// Small payload size to trigger frequent flushes and backpressure
-			buckets, err := loge.NewBuckets(2, 100, outputPath)
+			buckets, err := loge.NewBuckets(2, 100, outputPath, false)
 			Expect(err).NotTo(HaveOccurred())
 
 			// Flood with data to create backpressure
@@ -182,7 +182,7 @@ var _ = Describe("Buckets", func() {
 		})
 
 		It("completes Close() when called during active writes", func() {
-			buckets, err := loge.NewBuckets(2, 50, outputPath)
+			buckets, err := loge.NewBuckets(2, 50, outputPath, false)
 			Expect(err).NotTo(HaveOccurred())
 
 			// Start continuous writes in background
@@ -220,7 +220,7 @@ var _ = Describe("Buckets", func() {
 		})
 
 		It("does not lose data during shutdown", func() {
-			buckets, err := loge.NewBuckets(1, 10, outputPath)
+			buckets, err := loge.NewBuckets(1, 10, outputPath, false)
 			Expect(err).NotTo(HaveOccurred())
 
 			// Send exactly 25 payloads
@@ -261,7 +261,7 @@ var _ = Describe("Buckets", func() {
 
 		It("handles extreme backpressure without hanging", func() {
 			// Very small payload size and buffer to maximize backpressure
-			buckets, err := loge.NewBuckets(1, 5, outputPath)
+			buckets, err := loge.NewBuckets(1, 5, outputPath, false)
 			Expect(err).NotTo(HaveOccurred())
 
 			// Send enough data to definitely cause backpressure
@@ -305,6 +305,151 @@ var _ = Describe("Buckets", func() {
 
 			// We should have at least some data (may lose some during forced shutdown)
 			Expect(totalStreams).To(BeNumerically(">=", 1))
+		})
+	})
+
+	Describe("Drop on Backpressure", func() {
+		It("does not block when dropOnBackpressure is enabled", func() {
+			// Very small payload size to trigger backpressure quickly
+			buckets, err := loge.NewBuckets(1, 5, outputPath, true)
+			Expect(err).NotTo(HaveOccurred())
+
+			// Flood with data - should not block due to drop mode
+			startTime := time.Now()
+			for i := 0; i < 200; i++ {
+				buckets.Append(createPayload(1, 1))
+			}
+			appendDuration := time.Since(startTime)
+
+			// Appends should be fast (not blocking on backpressure)
+			// With blocking mode, this would take much longer
+			Expect(appendDuration).To(BeNumerically("<", 5*time.Second))
+
+			// Close should complete quickly since we drop on backpressure
+			closeDone := make(chan error, 1)
+			go func() {
+				closeDone <- buckets.Close()
+			}()
+
+			Eventually(closeDone, "30s").Should(Receive())
+		})
+
+		It("may lose data when dropOnBackpressure is enabled under heavy load", func() {
+			// Very small settings to maximize backpressure
+			buckets, err := loge.NewBuckets(1, 5, outputPath, true)
+			Expect(err).NotTo(HaveOccurred())
+
+			// Send a lot of data quickly
+			numPayloads := 500
+			for i := 0; i < numPayloads; i++ {
+				buckets.Append(createPayload(1, 1))
+			}
+
+			// Close
+			err = buckets.Close()
+			Expect(err).NotTo(HaveOccurred())
+
+			// Wait for files
+			Eventually(func() int {
+				matches, _ := filepath.Glob(filepath.Join(outputPath, "*.sqlite.zst"))
+				return len(matches)
+			}, "10s").Should(BeNumerically(">=", 1))
+
+			// Count data - we expect some data loss
+			matches, err := filepath.Glob(filepath.Join(outputPath, "*.sqlite.zst"))
+			Expect(err).NotTo(HaveOccurred())
+
+			totalStreams := 0
+			for _, match := range matches {
+				dbClient, err := sql.Open("sqlite3", match+"?vfs=zstd")
+				Expect(err).NotTo(HaveOccurred())
+
+				var count int
+				err = dbClient.QueryRow("SELECT COUNT(*) FROM streams").Scan(&count)
+				Expect(err).NotTo(HaveOccurred())
+				totalStreams += count
+				_ = dbClient.Close()
+			}
+
+			// Some data should be written, but likely less than all due to drops
+			Expect(totalStreams).To(BeNumerically(">=", 1))
+			// Note: We can't assert exact data loss since it depends on timing
+		})
+
+		It("does not lose data when dropOnBackpressure is disabled", func() {
+			buckets, err := loge.NewBuckets(1, 10, outputPath, false)
+			Expect(err).NotTo(HaveOccurred())
+
+			// Send data
+			numPayloads := 50
+			for i := 0; i < numPayloads; i++ {
+				buckets.Append(createPayload(1, 1))
+			}
+
+			// Close and wait
+			err = buckets.Close()
+			Expect(err).NotTo(HaveOccurred())
+
+			// Wait for files
+			Eventually(func() int {
+				matches, _ := filepath.Glob(filepath.Join(outputPath, "*.sqlite.zst"))
+				return len(matches)
+			}, "10s").Should(BeNumerically(">=", 1))
+
+			// Count data - should have all data
+			matches, err := filepath.Glob(filepath.Join(outputPath, "*.sqlite.zst"))
+			Expect(err).NotTo(HaveOccurred())
+
+			totalStreams := 0
+			for _, match := range matches {
+				dbClient, err := sql.Open("sqlite3", match+"?vfs=zstd")
+				Expect(err).NotTo(HaveOccurred())
+
+				var count int
+				err = dbClient.QueryRow("SELECT COUNT(*) FROM streams").Scan(&count)
+				Expect(err).NotTo(HaveOccurred())
+				totalStreams += count
+				_ = dbClient.Close()
+			}
+
+			// All data should be preserved
+			Expect(totalStreams).To(Equal(numPayloads))
+		})
+
+		It("shuts down quickly with dropOnBackpressure under extreme load", func() {
+			buckets, err := loge.NewBuckets(1, 5, outputPath, true)
+			Expect(err).NotTo(HaveOccurred())
+
+			// Continuously send data
+			stopWrites := make(chan struct{})
+			writesDone := make(chan struct{})
+			go func() {
+				defer close(writesDone)
+				for {
+					select {
+					case <-stopWrites:
+						return
+					default:
+						buckets.Append(createPayload(1, 1))
+					}
+				}
+			}()
+
+			// Let it run for a bit to build up backpressure
+			time.Sleep(200 * time.Millisecond)
+			close(stopWrites)
+
+			// Wait for writes to stop before closing
+			Eventually(writesDone, "1s").Should(BeClosed())
+
+			// Close should be fast since we drop data
+			startTime := time.Now()
+			err = buckets.Close()
+			closeDuration := time.Since(startTime)
+
+			Expect(err).NotTo(HaveOccurred())
+			// Should close within 10 seconds even under heavy load
+			Expect(closeDuration).To(BeNumerically("<", 10*time.Second))
 		})
 	})
 })

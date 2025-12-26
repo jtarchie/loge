@@ -48,17 +48,20 @@ func (c *CLI) Run() error {
 	router.JSONSerializer = DefaultJSONSerializer{}
 
 	router.POST("/api/v1/push", func(context echo.Context) error {
-		payload := Payload{}
+		payload := GetPayload()
 
-		err := bind(context, &payload)
+		err := bind(context, payload)
 		if err != nil {
+			PutPayload(payload)
 			return fmt.Errorf("could not bind payload: %w", err)
 		}
 		defer func() {
 			_ = context.Request().Body.Close()
 		}()
 
-		buckets.Append(payload)
+		// Note: payload ownership transfers to buckets, don't return to pool here
+		// The bucket worker will handle the payload lifecycle
+		buckets.Append(*payload)
 
 		return context.String(http.StatusOK, "")
 	})

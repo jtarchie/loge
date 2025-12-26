@@ -58,6 +58,41 @@ var encoderPool = sync.Pool{
 	},
 }
 
+// copyBufferPool holds reusable buffers for io.CopyBuffer
+const copyBufferSize = 32 * 1024 // 32KB buffer
+
+var copyBufferPool = sync.Pool{
+	New: func() any {
+		buf := make([]byte, copyBufferSize)
+		return &buf
+	},
+}
+
+// payloadPool reduces GC pressure by reusing Payload objects
+var payloadPool = sync.Pool{
+	New: func() any {
+		return &Payload{
+			Streams: make(Streams, 0, 8),
+		}
+	},
+}
+
+// GetPayload gets a Payload from the pool
+func GetPayload() *Payload {
+	return payloadPool.Get().(*Payload)
+}
+
+// PutPayload returns a Payload to the pool after resetting it
+func PutPayload(p *Payload) {
+	// Reset slices but keep capacity
+	for i := range p.Streams {
+		p.Streams[i].Stream = nil
+		p.Streams[i].Values = nil
+	}
+	p.Streams = p.Streams[:0]
+	payloadPool.Put(p)
+}
+
 func NewBuckets(
 	size int,
 	payloadSize int,
@@ -304,11 +339,21 @@ func flusher(payloads []Payload, outputDir string, prefix string) (string, error
 	var minTimestamp int64 = math.MaxInt64
 	var maxTimestamp int64 = math.MinInt64
 
-	// Collect all labels and streams for batch insert
-	var labels []labelEntry
-	var streams []streamEntry
+	// Pre-calculate sizes for slice allocation
+	totalLabels := 0
+	totalStreams := 0
+	for _, payload := range payloads {
+		totalLabels += len(payload.Streams)
+		for _, stream := range payload.Streams {
+			totalStreams += len(stream.Values)
+		}
+	}
 
-	// First pass: collect all data and assign label IDs
+	// Pre-allocate slices to avoid reallocation during append
+	labels := make([]labelEntry, 0, totalLabels)
+	streams := make([]streamEntry, 0, totalStreams)
+
+	// Collect all labels and streams for batch insert
 	labelID := int64(0)
 	for _, payload := range payloads {
 		for _, stream := range payload.Streams {
@@ -494,7 +539,11 @@ func compress(filename string) error {
 		_ = writer.Close()
 	}()
 
-	_, err = io.Copy(writer, input)
+	// Use pooled buffer for copying
+	bufPtr := copyBufferPool.Get().(*[]byte)
+	defer copyBufferPool.Put(bufPtr)
+
+	_, err = io.CopyBuffer(writer, input, *bufPtr)
 	if err != nil {
 		return fmt.Errorf("could not compress file: %w", err)
 	}

@@ -1,9 +1,14 @@
 package loge
 
 import (
+	"context"
 	"fmt"
+	"log/slog"
 	"net/http"
 	"os"
+	"os/signal"
+	"syscall"
+	"time"
 
 	"github.com/jtarchie/loge/managers"
 	_ "github.com/jtarchie/sqlitezstd"
@@ -70,5 +75,36 @@ func (c *CLI) Run() error {
 		})
 	})
 
-	return router.Start(fmt.Sprintf(":%d", c.Port))
+	// Graceful shutdown handling
+	quit := make(chan os.Signal, 1)
+	signal.Notify(quit, syscall.SIGINT, syscall.SIGTERM)
+
+	go func() {
+		<-quit
+		slog.Info("shutting down server...")
+
+		// Create a deadline for graceful shutdown
+		ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+		defer cancel()
+
+		// Stop accepting new requests
+		if err := router.Shutdown(ctx); err != nil {
+			slog.Error("server shutdown error", slog.String("error", err.Error()))
+		}
+	}()
+
+	// Start server
+	serverErr := router.Start(fmt.Sprintf(":%d", c.Port))
+	if serverErr != nil && serverErr != http.ErrServerClosed {
+		return serverErr
+	}
+
+	// After server stops, gracefully close buckets to flush all remaining data
+	slog.Info("flushing remaining data...")
+	if err := buckets.Close(); err != nil {
+		return fmt.Errorf("could not close buckets: %w", err)
+	}
+	slog.Info("shutdown complete")
+
+	return nil
 }

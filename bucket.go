@@ -8,6 +8,8 @@ import (
 	"math"
 	"os"
 	"path/filepath"
+	"strings"
+	"sync"
 	"time"
 
 	seekable "github.com/SaveTheRbtz/zstd-seekable-format-go/pkg"
@@ -17,19 +19,55 @@ import (
 )
 
 type Buckets struct {
-	receiver chan Payload
+	receiver    chan Payload
+	done        chan struct{}
+	wg          sync.WaitGroup
+	flushers    *worker.Worker[[]Payload]
+	compressors *worker.Worker[string]
 }
 
-const interval = 5 * time.Second
+const (
+	flushInterval  = 5 * time.Second
+	maxBatchInsert = 500 // max rows per batch INSERT
+	enqueueTimeout = 100 * time.Millisecond
+	enqueueRetries = 3
+)
+
+// Types for batch inserts
+type labelEntry struct {
+	payload string
+}
+
+type streamEntry struct {
+	timestamp int64
+	line      string
+	labelID   int64
+}
+
+// encoderPool holds reusable zstd encoders to avoid allocation overhead
+var encoderPool = sync.Pool{
+	New: func() any {
+		enc, err := zstd.NewWriter(nil,
+			zstd.WithEncoderLevel(zstd.SpeedBetterCompression),
+			zstd.WithEncoderConcurrency(1),
+		)
+		if err != nil {
+			return nil
+		}
+		return enc
+	},
+}
 
 func NewBuckets(
 	size int,
 	payloadSize int,
 	outputPath string,
 ) (*Buckets, error) {
-	receiver := make(chan Payload, size)
+	// Larger buffer: size * payloadSize for better burst handling
+	receiver := make(chan Payload, size*payloadSize)
+	done := make(chan struct{})
 
-	compressors := worker.New(size, 1, func(_ int, filename string) {
+	compressors := worker.New(size, max(size/2, 2), func(_ int, filename string) {
 		err := compress(filename)
 		if err != nil {
 			slog.Error("could not compress file", slog.String("filename", filename), slog.String("error", err.Error()))
@@ -45,39 +83,107 @@ func NewBuckets(
 		}
 	})
 
-	for index := range size {
-		go func(index int) {
-			payloads := make([]Payload, 0, payloadSize)
-			timer := time.NewTimer(interval)
-
-			for {
-				select {
-				case <-timer.C:
-					if len(payloads) > 0 && flushers.Enqueue(payloads, worker.WithTimeout(time.Millisecond)) {
-						payloads = make([]Payload, 0, payloadSize)
-						timer.Reset(interval)
-					}
-				case payload := <-receiver:
-					payloads = append(payloads, payload)
-					timer.Reset(interval)
-
-					if len(payloads) >= payloadSize {
-						if flushers.Enqueue(payloads, worker.WithTimeout(time.Millisecond)) {
-							payloads = make([]Payload, 0, payloadSize)
-						}
-					}
-				}
-			}
-		}(index)
+	buckets := &Buckets{
+		receiver:    receiver,
+		done:        done,
+		flushers:    flushers,
+		compressors: compressors,
 	}
 
-	return &Buckets{
-		receiver: receiver,
-	}, nil
+	for index := range size {
+		buckets.wg.Add(1)
+		go buckets.bucketWorker(index, payloadSize, flushers)
+	}
+
+	return buckets, nil
+}
+
+func (b *Buckets) bucketWorker(index int, payloadSize int, flushers *worker.Worker[[]Payload]) {
+	defer b.wg.Done()
+
+	payloads := make([]Payload, 0, payloadSize)
+	timer := time.NewTimer(flushInterval)
+	defer timer.Stop()
+
+	flush := func() {
+		if len(payloads) == 0 {
+			return
+		}
+
+		// Retry with exponential backoff on enqueue failure
+		for attempt := range enqueueRetries {
+			timeout := enqueueTimeout * time.Duration(1<<attempt)
+			if flushers.Enqueue(payloads, worker.WithTimeout(timeout)) {
+				payloads = make([]Payload, 0, payloadSize)
+				return
+			}
+			slog.Warn("flusher backpressure, retrying",
+				slog.Int("bucket", index),
+				slog.Int("attempt", attempt+1),
+				slog.Int("payloads", len(payloads)),
+			)
+		}
+
+		// Final attempt: block until enqueue succeeds (no data loss)
+		slog.Warn("flusher backpressure, blocking until flush completes",
+			slog.Int("bucket", index),
+			slog.Int("payloads", len(payloads)),
+		)
+		flushers.Enqueue(payloads) // blocks until space available
+		payloads = make([]Payload, 0, payloadSize)
+	}
+
+	for {
+		select {
+		case <-b.done:
+			// Graceful shutdown: flush remaining payloads
+			flush()
+			return
+
+		case <-timer.C:
+			flush()
+			timer.Reset(flushInterval)
+
+		case payload, ok := <-b.receiver:
+			if !ok {
+				// Channel closed, flush and exit
+				flush()
+				return
+			}
+
+			payloads = append(payloads, payload)
+			timer.Reset(flushInterval)
+
+			if len(payloads) >= payloadSize {
+				flush()
+			}
+		}
+	}
 }
 
 func (b *Buckets) Append(payload Payload) {
 	b.receiver <- payload
+}
+
+// Close gracefully shuts down all bucket workers, flushers, and compressors.
+// It ensures all in-flight data is flushed before returning.
+func (b *Buckets) Close() error {
+	// Signal all bucket workers to stop
+	close(b.done)
+
+	// Wait for all bucket workers to flush their remaining data
+	b.wg.Wait()
+
+	// Close the receiver channel (no more appends possible)
+	close(b.receiver)
+
+	// Wait for flushers to complete all pending work
+	b.flushers.Close()
+
+	// Wait for compressors to complete all pending work
+	b.compressors.Close()
+
+	return nil
 }
 
 func flusher(payloads []Payload, outputDir string, prefix string) (string, error) {
@@ -96,28 +202,37 @@ func flusher(payloads []Payload, outputDir string, prefix string) (string, error
 		_ = client.Close()
 	}()
 
+	// Performance pragmas - since we compress atomically, we don't need durability here
+	_, err = client.Exec(`
+		PRAGMA journal_mode = OFF;
+		PRAGMA synchronous = OFF;
+		PRAGMA locking_mode = EXCLUSIVE;
+		PRAGMA temp_store = MEMORY;
+		PRAGMA cache_size = -64000;
+		PRAGMA mmap_size = 268435456;
+	`)
+	if err != nil {
+		return "", fmt.Errorf("could not set pragmas %q: %w", filename, err)
+	}
+
+	// Schema without AUTOINCREMENT for ~10-15% faster inserts
 	_, err = client.Exec(`
 		CREATE TABLE labels (
-			id INTEGER PRIMARY KEY AUTOINCREMENT,
-			-- payload is a key-value store of string-string pairs
+			id INTEGER PRIMARY KEY,
 			payload BLOB
 		) STRICT;
 
 		CREATE TABLE streams (
-			id INTEGER PRIMARY KEY AUTOINCREMENT,
-			-- timestamp is the unix timestamp in nanoseconds
+			id INTEGER PRIMARY KEY,
 			timestamp INTEGER,
-			-- line is the log line
 			line TEXT,
-			-- label_id is the foreign key to the labels table
-			-- no constraint is enforced
 			label_id INTEGER
 		) STRICT;
 
 		CREATE TABLE metadata (
 			key TEXT PRIMARY KEY,
 			value TEXT
-		) STRICT;
+		) STRICT, WITHOUT ROWID;
 
 		CREATE VIRTUAL TABLE stream_tree USING rtree(
 			id,
@@ -136,60 +251,50 @@ func flusher(payloads []Payload, outputDir string, prefix string) (string, error
 		_ = transaction.Rollback()
 	}()
 
-	insertStream, err := transaction.Prepare(`
-		INSERT INTO streams
-			(timestamp, line, label_id)
-				VALUES
-			(?, ?, ?);
-	`)
-	if err != nil {
-		return "", fmt.Errorf("could not prepare insert %q: %w", filename, err)
-	}
-
-	insertLabels, err := transaction.Prepare(`
-		INSERT INTO labels
-			(payload)
-				VALUES
-			(jsonb(?));
-	`)
-	if err != nil {
-		return "", fmt.Errorf("could not prepare insert %q: %w", filename, err)
-	}
-
 	var minTimestamp int64 = math.MaxInt64
 	var maxTimestamp int64 = math.MinInt64
 
+	// Collect all labels and streams for batch insert
+	var labels []labelEntry
+	var streams []streamEntry
+
+	// First pass: collect all data and assign label IDs
+	labelID := int64(0)
 	for _, payload := range payloads {
 		for _, stream := range payload.Streams {
-			resultLabel, err := insertLabels.Exec(MarshalLabels(stream.Stream))
-			if err != nil {
-				return "", fmt.Errorf("could not insert %q: %w", filename, err)
-			}
-
-			labelID, _ := resultLabel.LastInsertId()
+			labelID++
+			labels = append(labels, labelEntry{
+				payload: MarshalLabels(stream.Stream),
+			})
 
 			for _, value := range stream.Values {
 				timestamp := value.Timestamp()
-
-				_, err := insertStream.Exec(timestamp, value[1], labelID)
-				if err != nil {
-					return "", fmt.Errorf("could not insert %q: %w", filename, err)
-				}
-
+				streams = append(streams, streamEntry{
+					timestamp: timestamp,
+					line:      value[1],
+					labelID:   labelID,
+				})
 				minTimestamp = min(minTimestamp, timestamp)
 				maxTimestamp = max(maxTimestamp, timestamp)
 			}
 		}
 	}
 
-	_, err = transaction.Exec(`INSERT INTO metadata (key, value) VALUES ('minTimestamp', ?);`, minTimestamp)
-	if err != nil {
-		return "", fmt.Errorf("could not insert minTimestamp %q: %w", filename, err)
+	// Batch insert labels
+	if err := batchInsertLabels(transaction, labels); err != nil {
+		return "", fmt.Errorf("could not insert labels %q: %w", filename, err)
 	}
 
-	_, err = transaction.Exec(`INSERT INTO metadata (key, value) VALUES ('maxTimestamp', ?);`, maxTimestamp)
+	// Batch insert streams
+	if err := batchInsertStreams(transaction, streams); err != nil {
+		return "", fmt.Errorf("could not insert streams %q: %w", filename, err)
+	}
+
+	// Insert metadata
+	_, err = transaction.Exec(`INSERT INTO metadata (key, value) VALUES ('minTimestamp', ?), ('maxTimestamp', ?);`,
+		minTimestamp, maxTimestamp)
 	if err != nil {
-		return "", fmt.Errorf("could not insert maxTimestamp %q: %w", filename, err)
+		return "", fmt.Errorf("could not insert metadata %q: %w", filename, err)
 	}
 
 	_, err = transaction.Exec(`
@@ -218,7 +323,7 @@ func flusher(payloads []Payload, outputDir string, prefix string) (string, error
 		INSERT INTO stream_tree (id, minTimestamp, maxTimestamp) SELECT id, timestamp, timestamp FROM streams;
 	`)
 	if err != nil {
-		return "", fmt.Errorf("could not create metadata %q: %w", filename, err)
+		return "", fmt.Errorf("could not create search index %q: %w", filename, err)
 	}
 
 	err = transaction.Commit()
@@ -227,13 +332,9 @@ func flusher(payloads []Payload, outputDir string, prefix string) (string, error
 	}
 
 	_, err = client.Exec(`
-			INSERT INTO
-				search(search)
-			VALUES
-				('optimize');
-
-			vacuum;
-			pragma optimize;
+		INSERT INTO search(search) VALUES ('optimize');
+		VACUUM;
+		PRAGMA optimize;
 	`)
 	if err != nil {
 		return "", fmt.Errorf("could not optimize %q: %w", filename, err)
@@ -245,6 +346,66 @@ func flusher(payloads []Payload, outputDir string, prefix string) (string, error
 	}
 
 	return filename, nil
+}
+
+func batchInsertLabels(tx *sql.Tx, labels []labelEntry) error {
+	if len(labels) == 0 {
+		return nil
+	}
+
+	for i := 0; i < len(labels); i += maxBatchInsert {
+		end := min(i+maxBatchInsert, len(labels))
+		batch := labels[i:end]
+
+		var sb strings.Builder
+		sb.WriteString("INSERT INTO labels (payload) VALUES ")
+
+		args := make([]any, 0, len(batch))
+		for j, l := range batch {
+			if j > 0 {
+				sb.WriteByte(',')
+			}
+			sb.WriteString("(jsonb(?))")
+			args = append(args, l.payload)
+		}
+
+		_, err := tx.Exec(sb.String(), args...)
+		if err != nil {
+			return err
+		}
+	}
+
+	return nil
+}
+
+func batchInsertStreams(tx *sql.Tx, streams []streamEntry) error {
+	if len(streams) == 0 {
+		return nil
+	}
+
+	for i := 0; i < len(streams); i += maxBatchInsert {
+		end := min(i+maxBatchInsert, len(streams))
+		batch := streams[i:end]
+
+		var sb strings.Builder
+		sb.WriteString("INSERT INTO streams (timestamp, line, label_id) VALUES ")
+
+		args := make([]any, 0, len(batch)*3)
+		for j, s := range batch {
+			if j > 0 {
+				sb.WriteByte(',')
+			}
+			sb.WriteString("(?,?,?)")
+			args = append(args, s.timestamp, s.line, s.labelID)
+		}
+
+		_, err := tx.Exec(sb.String(), args...)
+		if err != nil {
+			return err
+		}
+	}
+
+	return nil
 }
 
 func compress(filename string) error {
@@ -260,19 +421,22 @@ func compress(filename string) error {
 
 	input, err := os.Open(filename)
 	if err != nil {
-		return fmt.Errorf("could not create file: %w", err)
+		return fmt.Errorf("could not open file: %w", err)
 	}
 	defer func() {
 		_ = input.Close()
 	}()
 
-	encoder, err := zstd.NewWriter(nil, zstd.WithEncoderLevel(zstd.SpeedBetterCompression))
-	if err != nil {
-		return fmt.Errorf("could not load zstd: %w", err)
+	// Get encoder from pool
+	encoderIface := encoderPool.Get()
+	if encoderIface == nil {
+		return fmt.Errorf("could not get encoder from pool")
 	}
-	defer func() {
-		_ = encoder.Close()
-	}()
+	encoder := encoderIface.(*zstd.Encoder)
+	defer encoderPool.Put(encoder)
+
+	// Reset encoder for reuse
+	encoder.Reset(nil)
 
 	writer, err := seekable.NewWriter(output, encoder)
 	if err != nil {

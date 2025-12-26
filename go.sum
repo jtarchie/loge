@@ -68,8 +68,6 @@ github.com/jaswdr/faker/v2 v2.3.3 h1:0mA+B5YGjqgpOPdDY/72d6pDv7Z/5t6F1XzIfkUfgC4
 github.com/jaswdr/faker/v2 v2.3.3/go.mod h1:ROK8xwQV0hYOLDUtxCQgHGcl10jbVzIvqHxcIDdwY2Q=
 github.com/jtarchie/sqlitezstd v0.0.0-20250224213843-f1144dbef406 h1:KcYXdrghtLb7iW5P6aWC+OyEJMWo9H4ejLQnTY10bE4=
 github.com/jtarchie/sqlitezstd v0.0.0-20250224213843-f1144dbef406/go.mod h1:SdhdYsrO1IHL+XVJRNqhJQDSXs4IV5eLrEg46if6QtY=
-github.com/jtarchie/worker v0.0.0-20240513013643-934cdf402337 h1:xmRPQxYUxQUme7JrLI9frDqoQGZVizSLskFJMB0ZN1s=
-github.com/jtarchie/worker v0.0.0-20240513013643-934cdf402337/go.mod h1:2WQLRHxY9ImfrMKhh8GLh1LrUI6IOO41/rIY0ow+ILw=
 github.com/klauspost/compress v1.18.2 h1:iiPHWW0YrcFgpBYhsA6D1+fqHssJscY/Tm/y2Uqnapk=
 github.com/klauspost/compress v1.18.2/go.mod h1:R0h/fSBs8DE4ENlcrlib3PsXS61voFxhIs2DeRhCvJ4=
 github.com/kr/pretty v0.3.1 h1:flRD4NNwYAUpkphVc1HcthR4KEIFJ65n8Mw5qdRn3LE=
@@ -149,8 +147,6 @@ go.uber.org/zap v1.27.0 h1:aJMhYGrd5QSmlpLMr2MftRKl7t8J8PTZPA732ud/XR8=
 go.uber.org/zap v1.27.0/go.mod h1:GB2qFLM7cTU87MWRP2mPIjqfIDnGu+VIO4V/SdhGo2E=
 golang.org/x/crypto v0.46.0 h1:cKRW/pmt1pKAfetfu+RCEvjvZkA9RimPbh7bhFjGVBU=
 golang.org/x/crypto v0.46.0/go.mod h1:Evb/oLKmMraqjZ2iQTwDwvCtJkczlDuTmdJXoZVzqU0=
-golang.org/x/mod v0.31.0 h1:HaW9xtz0+kOcWKwli0ZXy79Ix+UW/vOfmWI5QVd2tgI=
-golang.org/x/mod v0.31.0/go.mod h1:43JraMp9cGx1Rx3AqioxrbrhNsLl2l/iNAvuBkrezpg=
 golang.org/x/net v0.48.0 h1:zyQRTTrjc33Lhh0fBgT/H3oZq9WuvRR5gPC70xpDiQU=
 golang.org/x/net v0.48.0/go.mod h1:+ndRgGjkh8FGtu1w1FGbEC31if4VrNVMuKTgcAAnQRY=
 golang.org/x/sync v0.19.0 h1:vV+1eWNmZ5geRlYjzm2adRgW2/mcpevXNg50YZtPCE4=

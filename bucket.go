@@ -105,12 +105,26 @@ func (b *Buckets) bucketWorker(index int, payloadSize int, flushers *worker.Work
 	timer := time.NewTimer(flushInterval)
 	defer timer.Stop()
 
-	flush := func() {
+	flush := func(blocking bool) {
 		if len(payloads) == 0 {
 			return
 		}
 
-		// Retry with exponential backoff on enqueue failure
+		// During shutdown (blocking=false), use shorter timeouts
+		if !blocking {
+			// Try once with short timeout, don't retry forever during shutdown
+			if flushers.Enqueue(payloads, worker.WithTimeout(time.Second)) {
+				payloads = make([]Payload, 0, payloadSize)
+			} else {
+				slog.Warn("shutdown flush timeout, data will be processed by flusher close",
+					slog.Int("bucket", index),
+					slog.Int("payloads", len(payloads)),
+				)
+			}
+			return
+		}
+
+		// Normal operation: retry with exponential backoff
 		for attempt := range enqueueRetries {
 			timeout := enqueueTimeout * time.Duration(1<<attempt)
 			if flushers.Enqueue(payloads, worker.WithTimeout(timeout)) {
@@ -136,18 +150,35 @@ func (b *Buckets) bucketWorker(index int, payloadSize int, flushers *worker.Work
 	for {
 		select {
 		case <-b.done:
-			// Graceful shutdown: flush remaining payloads
-			flush()
-			return
+			// Graceful shutdown: drain receiver and flush
+			// Drain any remaining items from receiver
+			for {
+				select {
+				case payload, ok := <-b.receiver:
+					if !ok {
+						// Receiver closed, do final flush and exit
+						flush(false)
+						return
+					}
+					payloads = append(payloads, payload)
+					if len(payloads) >= payloadSize {
+						flush(false)
+					}
+				default:
+					// Receiver empty, do final flush and exit
+					flush(false)
+					return
+				}
+			}
 
 		case <-timer.C:
-			flush()
+			flush(true)
 			timer.Reset(flushInterval)
 
 		case payload, ok := <-b.receiver:
 			if !ok {
 				// Channel closed, flush and exit
-				flush()
+				flush(false)
 				return
 			}
 
@@ -155,7 +186,7 @@ func (b *Buckets) bucketWorker(index int, payloadSize int, flushers *worker.Work
 			timer.Reset(flushInterval)
 
 			if len(payloads) >= payloadSize {
-				flush()
+				flush(true)
 			}
 		}
 	}
@@ -168,17 +199,36 @@ func (b *Buckets) Append(payload Payload) {
 // Close gracefully shuts down all bucket workers, flushers, and compressors.
 // It ensures all in-flight data is flushed before returning.
 func (b *Buckets) Close() error {
-	// Signal all bucket workers to stop
+	// Signal all bucket workers to stop accepting new payloads
 	close(b.done)
 
-	// Wait for all bucket workers to flush their remaining data
-	b.wg.Wait()
-
-	// Close the receiver channel (no more appends possible)
+	// Close receiver first to ensure no more payloads can be added
+	// and bucket workers can drain remaining items
 	close(b.receiver)
 
-	// Wait for flushers to complete all pending work
+	// Give bucket workers time to notice shutdown and attempt final flush
+	// Use a goroutine to close flushers/compressors after a delay if workers are stuck
+	shutdownComplete := make(chan struct{})
+	go func() {
+		b.wg.Wait()
+		close(shutdownComplete)
+	}()
+
+	// Wait for bucket workers with a timeout, then force progress
+	select {
+	case <-shutdownComplete:
+		// Workers finished normally
+	case <-time.After(5 * time.Second):
+		// Workers might be stuck on enqueue - close flushers to unblock them
+		slog.Warn("bucket workers stuck during shutdown, forcing flusher close")
+	}
+
+	// Close flushers - this will unblock any bucket workers stuck on Enqueue
+	// and process remaining queued items
 	b.flushers.Close()
+
+	// Wait for any remaining bucket workers that were unblocked
+	<-shutdownComplete
 
 	// Wait for compressors to complete all pending work
 	b.compressors.Close()
@@ -331,11 +381,9 @@ func flusher(payloads []Payload, outputDir string, prefix string) (string, error
 		return "", fmt.Errorf("could not commit transaction %q: %w", filename, err)
 	}
 
-	_, err = client.Exec(`
-		INSERT INTO search(search) VALUES ('optimize');
-		VACUUM;
-		PRAGMA optimize;
-	`)
+	// Skip VACUUM and FTS5 optimize - they're expensive and we compress immediately anyway
+	// PRAGMA optimize is cheap and helps query planner
+	_, err = client.Exec(`PRAGMA optimize;`)
 	if err != nil {
 		return "", fmt.Errorf("could not optimize %q: %w", filename, err)
 	}

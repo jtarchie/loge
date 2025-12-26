@@ -43,7 +43,11 @@ var _ = Describe("FileWatcher", func() {
 
 			watcher, err := filewatcher.New(outputPath, regexp.MustCompile(`file-\d+\.txt$`))
 			Expect(err).NotTo(HaveOccurred())
-			defer watcher.Close()
+			defer func() {
+				if err := watcher.Close(); err != nil {
+					Fail(err.Error())
+				}
+			}()
 
 			err = watcher.Iterate(func(filename string) error {
 				return errors.New("some error")
@@ -54,7 +58,11 @@ var _ = Describe("FileWatcher", func() {
 		It("does nothing if there are no files", func() {
 			watcher, err := filewatcher.New(outputPath, nil)
 			Expect(err).NotTo(HaveOccurred())
-			defer watcher.Close()
+			defer func() {
+				if err := watcher.Close(); err != nil {
+					Fail(err.Error())
+				}
+			}()
 
 			var files []string
 
@@ -76,7 +84,11 @@ var _ = Describe("FileWatcher", func() {
 
 			watcher, err := filewatcher.New(outputPath, regexp.MustCompile(`file-\d+\.txt$`))
 			Expect(err).NotTo(HaveOccurred())
-			defer watcher.Close()
+			defer func() {
+				if err := watcher.Close(); err != nil {
+					Fail(err.Error())
+				}
+			}()
 
 			var files []string
 
@@ -98,7 +110,11 @@ var _ = Describe("FileWatcher", func() {
 
 			watcher, err := filewatcher.New(outputPath, regexp.MustCompile(`file-\d+\.txt$`))
 			Expect(err).NotTo(HaveOccurred())
-			defer watcher.Close()
+			defer func() {
+				if err := watcher.Close(); err != nil {
+					Fail(err.Error())
+				}
+			}()
 
 			for range 10 {
 				_, err := os.Create(filepath.Join(outputPath, fmt.Sprintf("file-%d.txt", time.Now().UnixNano())))

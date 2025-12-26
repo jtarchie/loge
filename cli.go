@@ -28,7 +28,9 @@ func (c *CLI) Run() error {
 	if err != nil {
 		return fmt.Errorf("could not start manager: %w", err)
 	}
-	defer manager.Close()
+	defer func() {
+		_ = manager.Close()
+	}()
 
 	buckets, err := NewBuckets(c.Buckets, c.PayloadSize, c.OutputPath)
 	if err != nil {
@@ -47,7 +49,9 @@ func (c *CLI) Run() error {
 		if err != nil {
 			return fmt.Errorf("could not bind payload: %w", err)
 		}
-		defer context.Request().Body.Close()
+		defer func() {
+			_ = context.Request().Body.Close()
+		}()
 
 		buckets.Append(payload)
 

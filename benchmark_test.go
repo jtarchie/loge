@@ -20,7 +20,11 @@ func BenchmarkLocalManager(b *testing.B) {
 	if err != nil {
 		b.Fatalf("could not start manager: %s", err)
 	}
-	defer manager.Close()
+	defer func() {
+		if err := manager.Close(); err != nil {
+			b.Fatalf("could not close manager: %s", err)
+		}
+	}()
 
 	buckets, err := loge.NewBuckets(10, 100, outputPath)
 	if err != nil {

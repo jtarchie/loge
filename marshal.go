@@ -54,7 +54,7 @@ func marshalString(builder *strings.Builder, str string) {
 		default:
 			//nolint: gomnd
 			if char < 0x20 {
-				builder.WriteString(fmt.Sprintf("\\u%04x", char))
+				fmt.Fprintf(builder, "\\u%04x", char)
 			} else {
 				builder.WriteByte(char)
 			}

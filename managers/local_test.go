@@ -52,7 +52,11 @@ var _ = Describe("Local", func() {
 
 		manager, err := managers.NewLocal(outputPath)
 		Expect(err).NotTo(HaveOccurred())
-		defer manager.Close()
+		defer func() {
+			if err := manager.Close(); err != nil {
+				Fail(err.Error())
+			}
+		}()
 
 		labels, err := manager.Labels()
 		Expect(err).NotTo(HaveOccurred())

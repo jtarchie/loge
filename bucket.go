@@ -262,19 +262,25 @@ func compress(filename string) error {
 	if err != nil {
 		return fmt.Errorf("could not create file: %w", err)
 	}
-	defer input.Close()
+	defer func() {
+		_ = input.Close()
+	}()
 
 	encoder, err := zstd.NewWriter(nil, zstd.WithEncoderLevel(zstd.SpeedBetterCompression))
 	if err != nil {
 		return fmt.Errorf("could not load zstd: %w", err)
 	}
-	defer encoder.Close()
+	defer func() {
+		_ = encoder.Close()
+	}()
 
 	writer, err := seekable.NewWriter(output, encoder)
 	if err != nil {
 		return fmt.Errorf("could not load writer: %w", err)
 	}
-	defer writer.Close()
+	defer func() {
+		_ = writer.Close()
+	}()
 
 	_, err = io.Copy(writer, input)
 	if err != nil {

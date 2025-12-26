@@ -109,14 +109,14 @@ func NewBuckets(
 	// Larger buffer: size * payloadSize for better burst handling
 	receiver := make(chan Payload, size*payloadSize)
 
-	compressors := worker.New(size, max(size/2, 2), func(_ int, filename string) {
+	compressors := worker.NewWithContext(ctx, size, max(size/2, 2), func(_ int, filename string) {
 		err := compress(filename)
 		if err != nil {
 			slog.Error("could not compress file", slog.String("filename", filename), slog.String("error", err.Error()))
 		}
 	})
 
-	flushers := worker.New(size, max(size/2, 2), func(index int, payloads []Payload) {
+	flushers := worker.NewWithContext(ctx, size, max(size/2, 2), func(index int, payloads []Payload) {
 		filename, err := flusher(payloads, outputPath, fmt.Sprintf("bucket-%d", index))
 		if err != nil {
 			slog.Error("could not flush payloads", slog.Int("index", index), slog.String("error", err.Error()))

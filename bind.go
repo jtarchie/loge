@@ -3,19 +3,57 @@ package loge
 import (
 	"errors"
 	"fmt"
+	"io"
 	"strings"
 
 	"github.com/goccy/go-json"
+	pb "github.com/jtarchie/loge/proto"
 	"github.com/labstack/echo/v4"
 	"github.com/tinylib/msgp/msgp"
+	"google.golang.org/protobuf/proto"
 )
 
-const msgpackContentType = "application/msgpack"
+const (
+	msgpackContentType  = "application/msgpack"
+	protobufContentType = "application/protobuf"
+)
 
 func bind(context echo.Context, payload interface{}) error {
 	contentType := context.Request().Header.Get(echo.HeaderContentType)
 
 	switch {
+	case strings.Contains(contentType, protobufContentType):
+		p, ok := payload.(*Payload)
+		if !ok {
+			return errors.New("could not convert payload to protobuf target")
+		}
+
+		body, err := io.ReadAll(context.Request().Body)
+		if err != nil {
+			return fmt.Errorf("could not read protobuf body: %w", err)
+		}
+
+		pbPayload := &pb.Payload{}
+		if err := proto.Unmarshal(body, pbPayload); err != nil {
+			return fmt.Errorf("could not unmarshal protobuf: %w", err)
+		}
+
+		// Convert protobuf payload to internal Payload type
+		p.Streams = make(Streams, 0, len(pbPayload.Streams))
+		for _, stream := range pbPayload.Streams {
+			entry := Entry{
+				Stream: make(Stream, len(stream.Stream)),
+				Values: make(Values, 0, len(stream.Values)),
+			}
+			for k, v := range stream.Stream {
+				entry.Stream[k] = v
+			}
+			for _, val := range stream.Values {
+				entry.Values = append(entry.Values, Value{val.Timestamp, val.Line})
+			}
+			p.Streams = append(p.Streams, entry)
+		}
+
 	case strings.Contains(contentType, msgpackContentType):
 		decodable, ok := payload.(msgp.Decodable)
 		if !ok {

@@ -1,0 +1,19 @@
+syntax = "proto3";
+
+package loge;
+
+option go_package = "github.com/jtarchie/loge/proto";
+
+message Payload {
+  repeated StreamEntry streams = 1;
+}
+
+message StreamEntry {
+  map<string, string> stream = 1;
+  repeated Value values = 2;
+}
+
+message Value {
+  string timestamp = 1;
+  string line = 2;
+}

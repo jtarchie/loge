@@ -8,16 +8,61 @@ tasks:
   lint: golangci-lint run --fix --timeout "10m"
   test: go run github.com/onsi/ginkgo/v2/ginkgo -tags fts5 -cover -race -r
   server: go run -tags fts5 loge/main.go --port 6500 --payload-size 100000 --buckets 2
+  proto:
+    desc: Generate protobuf Go code
+    cmds:
+    - protoc --go_out=. --go_opt=paths=source_relative proto/payload.proto
+    sources:
+    - proto/*.proto
+    generates:
+    - proto/*.pb.go
   default:
     cmds:
-    - go generate ./...
+    - GOFLAGS='-mod=mod' go generate ./...
     - task: format
     - task: lint
     - task: test
   bench:
+    desc: Run benchmarks (starts server, runs k6 tests, then stops server)
     cmds:
     - rm -Rf tmp/
     - go test -tags fts5 -bench=. -benchmem -run ^$
-    - while ! nc -z localhost 6500; do sleep 1; done
-    - k6 run benchmark/streams.msgpack.js
-    - k6 run benchmark/streams.json.js
+    - |
+      # Start server in background and capture PID
+      go run -tags fts5 loge/main.go --port 6500 --payload-size 100000 --buckets 2 &
+      SERVER_PID=$!
+      echo "Started server with PID $SERVER_PID"
+      
+      # Cleanup function to ensure server is stopped
+      cleanup() {
+        echo "Stopping server (PID $SERVER_PID)..."
+        kill $SERVER_PID 2>/dev/null || true
+        wait $SERVER_PID 2>/dev/null || true
+      }
+      trap cleanup EXIT
+      
+      # Wait for server to be ready (with timeout)
+      echo "Waiting for server to be ready..."
+      for i in $(seq 1 30); do
+        if nc -z localhost 6500 2>/dev/null; then
+          echo "Server is ready!"
+          break
+        fi
+        if [ $i -eq 30 ]; then
+          echo "Server failed to start within 30 seconds"
+          exit 1
+        fi
+        sleep 1
+      done
+      
+      # Run k6 benchmarks
+      echo "Running msgpack benchmark..."
+      k6 run benchmark/streams.msgpack.js
+      
+      echo "Running JSON benchmark..."
+      k6 run benchmark/streams.json.js
+      
+      echo "Running protobuf benchmark..."
+      k6 run benchmark/streams.protobuf.js
+      
+      echo "Benchmarks complete!"

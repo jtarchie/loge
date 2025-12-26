@@ -1,6 +1,7 @@
 package loge
 
 import (
+	"context"
 	"database/sql"
 	"fmt"
 	"io"
@@ -19,11 +20,12 @@ import (
 )
 
 type Buckets struct {
-	receiver          chan Payload
-	done              chan struct{}
-	wg                sync.WaitGroup
-	flushers          *worker.Worker[[]Payload]
-	compressors       *worker.Worker[string]
+	receiver           chan Payload
+	ctx                context.Context
+	cancel             context.CancelFunc
+	wg                 sync.WaitGroup
+	flushers           *worker.Worker[[]Payload]
+	compressors        *worker.Worker[string]
 	dropOnBackpressure bool
 }
 
@@ -95,14 +97,17 @@ func PutPayload(p *Payload) {
 }
 
 func NewBuckets(
+	ctx context.Context,
 	size int,
 	payloadSize int,
 	outputPath string,
 	dropOnBackpressure bool,
 ) (*Buckets, error) {
+	// Create a cancellable context for shutdown
+	ctx, cancel := context.WithCancel(ctx)
+
 	// Larger buffer: size * payloadSize for better burst handling
 	receiver := make(chan Payload, size*payloadSize)
-	done := make(chan struct{})
 
 	compressors := worker.New(size, max(size/2, 2), func(_ int, filename string) {
 		err := compress(filename)
@@ -121,10 +126,11 @@ func NewBuckets(
 	})
 
 	buckets := &Buckets{
-		receiver:          receiver,
-		done:              done,
-		flushers:          flushers,
-		compressors:       compressors,
+		receiver:           receiver,
+		ctx:                ctx,
+		cancel:             cancel,
+		flushers:           flushers,
+		compressors:        compressors,
 		dropOnBackpressure: dropOnBackpressure,
 	}
 
@@ -197,7 +203,7 @@ func (b *Buckets) bucketWorker(index int, payloadSize int, flushers *worker.Work
 
 	for {
 		select {
-		case <-b.done:
+		case <-b.ctx.Done():
 			// Graceful shutdown: drain receiver and flush
 			// Drain any remaining items from receiver
 			for {
@@ -247,8 +253,8 @@ func (b *Buckets) Append(payload Payload) {
 // Close gracefully shuts down all bucket workers, flushers, and compressors.
 // It ensures all in-flight data is flushed before returning.
 func (b *Buckets) Close() error {
-	// Signal all bucket workers to stop accepting new payloads
-	close(b.done)
+	// Signal all bucket workers to stop accepting new payloads via context cancellation
+	b.cancel()
 
 	// Close receiver to ensure no more payloads can be added
 	// and bucket workers can drain remaining items

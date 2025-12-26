@@ -1,6 +1,7 @@
 package loge_test
 
 import (
+	"context"
 	"database/sql"
 	"os"
 	"path/filepath"
@@ -24,7 +25,7 @@ var _ = Describe("Buckets", func() {
 
 	When("there is one bucket", func() {
 		It("only creates file at a time", func() {
-			buckets, err := loge.NewBuckets(1, 1, outputPath, false)
+			buckets, err := loge.NewBuckets(context.Background(), 1, 1, outputPath, false)
 			Expect(err).NotTo(HaveOccurred())
 			buckets.Append(createPayload(1, 1))
 
@@ -43,7 +44,7 @@ var _ = Describe("Buckets", func() {
 
 		It("creates data that can be searched", func() {
 			payload := createPayload(1, 1)
-			buckets, err := loge.NewBuckets(1, 1, outputPath, false)
+			buckets, err := loge.NewBuckets(context.Background(), 1, 1, outputPath, false)
 			Expect(err).NotTo(HaveOccurred())
 			buckets.Append(payload)
 
@@ -86,7 +87,7 @@ var _ = Describe("Buckets", func() {
 	})
 
 	DescribeTable("When creating files", func(bucketSize, payloadSize, values, expectedFiles int) {
-		buckets, err := loge.NewBuckets(bucketSize, payloadSize, outputPath, false)
+		buckets, err := loge.NewBuckets(context.Background(), bucketSize, payloadSize, outputPath, false)
 		Expect(err).NotTo(HaveOccurred())
 
 		for range values {
@@ -113,7 +114,7 @@ var _ = Describe("Buckets", func() {
 
 	Describe("Graceful Shutdown", func() {
 		It("completes Close() quickly with no data", func() {
-			buckets, err := loge.NewBuckets(2, 100, outputPath, false)
+			buckets, err := loge.NewBuckets(context.Background(), 2, 100, outputPath, false)
 			Expect(err).NotTo(HaveOccurred())
 
 			// Send one payload and wait a bit to ensure workers are initialized
@@ -126,7 +127,7 @@ var _ = Describe("Buckets", func() {
 		})
 
 		It("completes Close() after flushing pending data", func() {
-			buckets, err := loge.NewBuckets(2, 10, outputPath, false)
+			buckets, err := loge.NewBuckets(context.Background(), 2, 10, outputPath, false)
 			Expect(err).NotTo(HaveOccurred())
 
 			// Add some data (not enough to trigger automatic flush)
@@ -149,7 +150,7 @@ var _ = Describe("Buckets", func() {
 
 		It("completes Close() under heavy load with backpressure", func() {
 			// Small payload size to trigger frequent flushes and backpressure
-			buckets, err := loge.NewBuckets(2, 100, outputPath, false)
+			buckets, err := loge.NewBuckets(context.Background(), 2, 100, outputPath, false)
 			Expect(err).NotTo(HaveOccurred())
 
 			// Flood with data to create backpressure
@@ -182,7 +183,7 @@ var _ = Describe("Buckets", func() {
 		})
 
 		It("completes Close() when called during active writes", func() {
-			buckets, err := loge.NewBuckets(2, 50, outputPath, false)
+			buckets, err := loge.NewBuckets(context.Background(), 2, 50, outputPath, false)
 			Expect(err).NotTo(HaveOccurred())
 
 			// Start continuous writes in background
@@ -220,7 +221,7 @@ var _ = Describe("Buckets", func() {
 		})
 
 		It("does not lose data during shutdown", func() {
-			buckets, err := loge.NewBuckets(1, 10, outputPath, false)
+			buckets, err := loge.NewBuckets(context.Background(), 1, 10, outputPath, false)
 			Expect(err).NotTo(HaveOccurred())
 
 			// Send exactly 25 payloads
@@ -261,7 +262,7 @@ var _ = Describe("Buckets", func() {
 
 		It("handles extreme backpressure without hanging", func() {
 			// Very small payload size and buffer to maximize backpressure
-			buckets, err := loge.NewBuckets(1, 5, outputPath, false)
+			buckets, err := loge.NewBuckets(context.Background(), 1, 5, outputPath, false)
 			Expect(err).NotTo(HaveOccurred())
 
 			// Send enough data to definitely cause backpressure
@@ -311,7 +312,7 @@ var _ = Describe("Buckets", func() {
 	Describe("Drop on Backpressure", func() {
 		It("does not block when dropOnBackpressure is enabled", func() {
 			// Very small payload size to trigger backpressure quickly
-			buckets, err := loge.NewBuckets(1, 5, outputPath, true)
+			buckets, err := loge.NewBuckets(context.Background(), 1, 5, outputPath, true)
 			Expect(err).NotTo(HaveOccurred())
 
 			// Flood with data - should not block due to drop mode
@@ -336,7 +337,7 @@ var _ = Describe("Buckets", func() {
 
 		It("may lose data when dropOnBackpressure is enabled under heavy load", func() {
 			// Very small settings to maximize backpressure
-			buckets, err := loge.NewBuckets(1, 5, outputPath, true)
+			buckets, err := loge.NewBuckets(context.Background(), 1, 5, outputPath, true)
 			Expect(err).NotTo(HaveOccurred())
 
 			// Send a lot of data quickly
@@ -377,7 +378,7 @@ var _ = Describe("Buckets", func() {
 		})
 
 		It("does not lose data when dropOnBackpressure is disabled", func() {
-			buckets, err := loge.NewBuckets(1, 10, outputPath, false)
+			buckets, err := loge.NewBuckets(context.Background(), 1, 10, outputPath, false)
 			Expect(err).NotTo(HaveOccurred())
 
 			// Send data
@@ -417,7 +418,7 @@ var _ = Describe("Buckets", func() {
 		})
 
 		It("shuts down quickly with dropOnBackpressure under extreme load", func() {
-			buckets, err := loge.NewBuckets(1, 5, outputPath, true)
+			buckets, err := loge.NewBuckets(context.Background(), 1, 5, outputPath, true)
 			Expect(err).NotTo(HaveOccurred())
 
 			// Continuously send data

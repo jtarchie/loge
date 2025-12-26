@@ -1,6 +1,7 @@
 package managers_test
 
 import (
+	"context"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -23,7 +24,7 @@ var _ = Describe("Local", func() {
 	})
 
 	It("returns all the labels", func() {
-		buckets, err := loge.NewBuckets(1, 5, outputPath, false)
+		buckets, err := loge.NewBuckets(context.Background(), 1, 5, outputPath, false)
 		Expect(err).NotTo(HaveOccurred())
 
 		for i := range 5 {

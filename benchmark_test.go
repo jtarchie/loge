@@ -1,6 +1,7 @@
 package loge_test
 
 import (
+	"context"
 	"os"
 	"testing"
 	"time"
@@ -26,7 +27,7 @@ func BenchmarkLocalManager(b *testing.B) {
 		}
 	}()
 
-	buckets, err := loge.NewBuckets(10, 100, outputPath, false)
+	buckets, err := loge.NewBuckets(context.Background(), 10, 100, outputPath, false)
 	if err != nil {
 		b.Fatalf("could not create buckets: %s", err)
 	}
@@ -72,7 +73,7 @@ func BenchmarkBucketsWithBackpressure(b *testing.B) {
 	}
 	defer os.RemoveAll(outputPath)
 
-	buckets, err := loge.NewBuckets(2, 1000, outputPath, false)
+	buckets, err := loge.NewBuckets(context.Background(), 2, 1000, outputPath, false)
 	if err != nil {
 		b.Fatalf("could not create buckets: %s", err)
 	}
@@ -97,7 +98,7 @@ func BenchmarkBucketsDropOnBackpressure(b *testing.B) {
 	}
 	defer os.RemoveAll(outputPath)
 
-	buckets, err := loge.NewBuckets(2, 1000, outputPath, true)
+	buckets, err := loge.NewBuckets(context.Background(), 2, 1000, outputPath, true)
 	if err != nil {
 		b.Fatalf("could not create buckets: %s", err)
 	}
@@ -122,7 +123,7 @@ func BenchmarkBucketsParallelWithBackpressure(b *testing.B) {
 	}
 	defer os.RemoveAll(outputPath)
 
-	buckets, err := loge.NewBuckets(4, 1000, outputPath, false)
+	buckets, err := loge.NewBuckets(context.Background(), 4, 1000, outputPath, false)
 	if err != nil {
 		b.Fatalf("could not create buckets: %s", err)
 	}
@@ -148,7 +149,7 @@ func BenchmarkBucketsParallelDropOnBackpressure(b *testing.B) {
 	}
 	defer os.RemoveAll(outputPath)
 
-	buckets, err := loge.NewBuckets(4, 1000, outputPath, true)
+	buckets, err := loge.NewBuckets(context.Background(), 4, 1000, outputPath, true)
 	if err != nil {
 		b.Fatalf("could not create buckets: %s", err)
 	}

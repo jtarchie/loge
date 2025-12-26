@@ -17,10 +17,10 @@ import (
 )
 
 type CLI struct {
-	Port              int    `default:"3000"  help:"start HTTP server on port"            required:""`
-	Buckets           int    `default:"8"     help:"number of buckets to fill into"       required:""`
-	PayloadSize       int    `default:"10000" help:"size of the bucket payload"           required:""`
-	OutputPath        string `default:"tmp/"  help:"output path for all the sqlite files" required:""`
+	Port               int    `default:"3000"  help:"start HTTP server on port"            required:""`
+	Buckets            int    `default:"8"     help:"number of buckets to fill into"       required:""`
+	PayloadSize        int    `default:"10000" help:"size of the bucket payload"           required:""`
+	OutputPath         string `default:"tmp/"  help:"output path for all the sqlite files" required:""`
 	DropOnBackpressure bool   `default:"false" help:"drop data instead of blocking when backpressure occurs"`
 }
 
@@ -38,7 +38,11 @@ func (c *CLI) Run() error {
 		_ = manager.Close()
 	}()
 
-	buckets, err := NewBuckets(c.Buckets, c.PayloadSize, c.OutputPath, c.DropOnBackpressure)
+	// Create a context that will be cancelled on shutdown signal
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	buckets, err := NewBuckets(ctx, c.Buckets, c.PayloadSize, c.OutputPath, c.DropOnBackpressure)
 	if err != nil {
 		return fmt.Errorf("could not create buckets: %w", err)
 	}
@@ -87,12 +91,15 @@ func (c *CLI) Run() error {
 		<-quit
 		slog.Info("shutting down server...")
 
-		// Create a deadline for graceful shutdown
-		ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
-		defer cancel()
+		// Cancel the bucket context to signal shutdown
+		cancel()
+
+		// Create a deadline for graceful HTTP shutdown
+		shutdownCtx, shutdownCancel := context.WithTimeout(context.Background(), 30*time.Second)
+		defer shutdownCancel()
 
 		// Stop accepting new requests
-		if err := router.Shutdown(ctx); err != nil {
+		if err := router.Shutdown(shutdownCtx); err != nil {
 			slog.Error("server shutdown error", slog.String("error", err.Error()))
 		}
 	}()

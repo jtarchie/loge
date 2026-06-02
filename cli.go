@@ -11,12 +11,35 @@ import (
 	"syscall"
 	"time"
 
+	"sync"
+
 	"github.com/goccy/go-json"
 	"github.com/jtarchie/loge/managers"
-	_ "github.com/jtarchie/sqlitezstd"
+	"github.com/jtarchie/sqlitezstd"
 	"github.com/labstack/echo/v4"
 	"github.com/labstack/echo/v4/middleware"
 )
+
+// cacheVFSName is a sqlite VFS registered once with an HTTP read cache, used to
+// open (local and remote) segments. The cache is a no-op for local files.
+const cacheVFSName = "zstdcache"
+
+var (
+	cacheVFSOnce sync.Once
+	cacheVFSErr  error
+)
+
+func ensureCacheVFS(cacheBytes int64, pageBytes int) (string, error) {
+	cacheVFSOnce.Do(func() {
+		cacheVFSErr = sqlitezstd.Register(cacheVFSName,
+			sqlitezstd.WithHTTPCacheSize(cacheBytes),
+			sqlitezstd.WithHTTPPageSize(pageBytes),
+			sqlitezstd.WithLogger(slog.Default()),
+		)
+	})
+
+	return cacheVFSName, cacheVFSErr
+}
 
 // QueryResponse is the JSON shape returned by the query endpoint.
 type QueryResponse struct {
@@ -35,6 +58,22 @@ type CLI struct {
 	CompactMinFiles    int           `default:"8"     help:"minimum number of flush files before a compaction pass runs"`
 	Durable            bool          `default:"true"  help:"write-ahead log each payload (fsync) before acknowledging; disable for faster, lossy-on-crash ingest"`
 	CheckpointInterval time.Duration `default:"2s"    help:"how often to fsync new segments and prune the write-ahead log"`
+	QueryConcurrency   int           `default:"8"     help:"max segments a query opens in parallel"`
+
+	// S3 tiered storage (rotate old segments to S3, read them back over HTTP).
+	// Leave --s3-bucket empty to keep everything local.
+	S3Bucket         string        `name:"s3-bucket"            default:""      help:"S3 bucket to rotate old segments into (empty disables S3 tiering)"`
+	S3Prefix         string        `name:"s3-prefix"            default:"loge/" help:"key prefix for uploaded segments"`
+	S3Endpoint       string        `name:"s3-endpoint"          default:""      help:"custom S3 endpoint (e.g. MinIO); empty uses AWS"`
+	S3Region         string        `name:"s3-region"            default:""      help:"S3 region (else from the AWS environment)"`
+	S3ForcePathStyle bool          `name:"s3-force-path-style"  default:"false" help:"use path-style S3 addressing (needed for MinIO)"`
+	S3ReadURLBase    string        `name:"s3-read-url-base"     default:""      help:"public/CDN base URL reads are served from; empty derives from bucket/region/endpoint"`
+	S3ACL            string        `name:"s3-acl"               default:""      help:"canned ACL for uploaded objects (e.g. public-read); empty relies on bucket policy"`
+	S3RotateAge      time.Duration `name:"s3-rotate-age"        default:"1h"    help:"rotate local segments older than this to S3"`
+	S3RotateInterval time.Duration `name:"s3-rotate-interval"   default:"1m"    help:"how often the rotation loop runs"`
+	S3RotateGrace    time.Duration `name:"s3-rotate-grace"      default:"1m"    help:"keep a rotated segment's local copy this long before deleting it"`
+	S3HTTPCacheBytes int64         `name:"s3-http-cache-bytes"  default:"33554432" help:"per-file in-memory HTTP read cache for remote segments (bytes; 0 disables)"`
+	S3HTTPPageBytes  int           `name:"s3-http-page-bytes"   default:"0"     help:"coalescing page size for the HTTP read cache (0 uses the default)"`
 }
 
 func (c *CLI) Run() error {
@@ -43,7 +82,32 @@ func (c *CLI) Run() error {
 		return fmt.Errorf("could not create directory: %w", err)
 	}
 
-	manager, err := managers.NewLocal(c.OutputPath)
+	// Register the HTTP-caching VFS used to open segments (local and remote).
+	vfsName, err := ensureCacheVFS(c.S3HTTPCacheBytes, c.S3HTTPPageBytes)
+	if err != nil {
+		return fmt.Errorf("could not register cache vfs: %w", err)
+	}
+
+	// The catalog indexes every compacted segment (local or remote) so queries
+	// can prune by time without opening files. Reconcile rebuilds it from the
+	// segments on disk in case it lagged a crash.
+	catalog, err := managers.OpenCatalog(c.OutputPath)
+	if err != nil {
+		return fmt.Errorf("could not open catalog: %w", err)
+	}
+	defer func() {
+		_ = catalog.Close()
+	}()
+
+	if err := catalog.Reconcile(c.OutputPath); err != nil {
+		return fmt.Errorf("could not reconcile catalog: %w", err)
+	}
+
+	manager, err := managers.NewLocal(c.OutputPath,
+		managers.WithCatalog(catalog),
+		managers.WithVFS(vfsName),
+		managers.WithQueryConcurrency(c.QueryConcurrency),
+	)
 	if err != nil {
 		return fmt.Errorf("could not start manager: %w", err)
 	}
@@ -110,8 +174,36 @@ func (c *CLI) Run() error {
 	// Background compaction merges the many small flush files into fewer,
 	// larger indexed segments. Disabled when the interval is non-positive.
 	if c.CompactInterval > 0 {
-		compactor := NewCompactor(c.OutputPath, c.CompactMinFiles, 0, c.CompactInterval)
+		compactor := NewCompactor(c.OutputPath, c.CompactMinFiles, 0, c.CompactInterval,
+			WithCompactorCatalog(catalog))
 		go compactor.Run(ctx)
+	}
+
+	// Optional S3 tiering: rotate segments older than --s3-rotate-age to S3 and
+	// serve their reads back over HTTP. Ingest durability is unaffected — S3
+	// only receives already-durable, compacted, queryable segments, so an upload
+	// failure or S3 outage just keeps a segment local.
+	if c.S3Bucket != "" {
+		store, err := NewS3Store(ctx, S3Config{
+			Bucket:         c.S3Bucket,
+			Prefix:         c.S3Prefix,
+			Endpoint:       c.S3Endpoint,
+			Region:         c.S3Region,
+			ForcePathStyle: c.S3ForcePathStyle,
+			ReadURLBase:    c.S3ReadURLBase,
+			ACL:            c.S3ACL,
+		})
+		if err != nil {
+			return fmt.Errorf("could not create s3 store: %w", err)
+		}
+
+		uploader := NewUploader(c.OutputPath, catalog, store,
+			WithUploadPrefix(c.S3Prefix),
+			WithRotateAge(c.S3RotateAge),
+			WithRotateGrace(c.S3RotateGrace),
+			WithRotateInterval(c.S3RotateInterval),
+		)
+		go uploader.Run(ctx)
 	}
 
 	router := echo.New()

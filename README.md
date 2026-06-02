@@ -26,11 +26,19 @@ POST /api/v1/push ──► bucket workers batch ──► flush to <bucket>.sql
   session.
 - **Compaction** runs in the background, merging the many small flush files into
   fewer, larger, time-local segments and building the expensive indexes once per
-  segment instead of once per flush.
-- **Queries** prune files whose stored time bounds fall outside the requested
-  window, match labels with `json_extract`, accelerate line search with the
-  segment trigram index (falling back to a scan on freshly flushed files), and
-  merge results newest-first across files.
+  segment instead of once per flush. Each segment is recorded in a small local
+  **catalog** (`catalog.sqlite`) with its time bounds and label keys.
+- **Queries** ask the catalog for the segments whose time bounds overlap the
+  requested window (pruning the rest without opening any file), match labels with
+  `json_extract`, accelerate line search with the segment trigram index, fan out
+  across the surviving segments in parallel, and merge results newest-first.
+- **S3 tiering** (optional): segments older than `--s3-rotate-age` are rotated to
+  S3 and the catalog is flipped to point at their public URL; recent segments stay
+  local. Queries read cold (S3) segments back over HTTP via the seekable-zstd VFS,
+  fetching only the bytes an indexed query needs (coalesced and cached). Pruning
+  means most queries touch S3 zero times; an S3 outage degrades a query to its
+  local results rather than failing. Ingest durability is unaffected — S3 only
+  ever receives already-durable, compacted segments.
 
 ## HTTP API
 
@@ -87,6 +95,23 @@ substring filter on the log line. Response:
 | `--durable` | `true` | fsync each payload to the write-ahead log before acknowledging |
 | `--checkpoint-interval` | `2s` | how often to fsync new segments and prune the write-ahead log |
 | `--drop-on-backpressure` | `false` | drop instead of blocking when the flush pipeline is saturated (ignored when `--durable`) |
+| `--query-concurrency` | `8` | max segments a query opens in parallel |
+| `--s3-bucket` | `""` | S3 bucket to rotate old segments into (empty disables S3 tiering) |
+| `--s3-prefix` | `loge/` | key prefix for uploaded segments |
+| `--s3-endpoint` | `""` | custom S3 endpoint (e.g. MinIO); empty uses AWS |
+| `--s3-region` | `""` | S3 region (else from the AWS environment) |
+| `--s3-force-path-style` | `false` | path-style addressing (needed for MinIO) |
+| `--s3-read-url-base` | `""` | public/CDN base URL reads are served from; empty derives it |
+| `--s3-acl` | `""` | canned ACL for uploads (e.g. `public-read`); empty relies on bucket policy |
+| `--s3-rotate-age` | `1h` | rotate local segments older than this to S3 |
+| `--s3-rotate-interval` | `1m` | how often the rotation loop runs |
+| `--s3-rotate-grace` | `1m` | keep a rotated segment's local copy this long before deleting it |
+| `--s3-http-cache-bytes` | `32 MiB` | per-file in-memory HTTP read cache for remote segments (`0` disables) |
+
+S3 reads are **public, path-based** HTTP GETs (auth must not ride in the URL query
+string — `go-sqlite3` strips it), so the bucket/prefix must be readable without
+signed query params (public objects, a bucket policy, or a CDN). Upload
+credentials come from the standard AWS chain (env / shared config / IAM role).
 
 ## Development
 

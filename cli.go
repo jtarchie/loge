@@ -18,8 +18,8 @@ import (
 
 type CLI struct {
 	Port               int    `default:"3000"  help:"start HTTP server on port"            required:""`
-	Buckets            int    `default:"8"     help:"number of buckets to fill into"       required:""`
-	PayloadSize        int    `default:"10000" help:"size of the bucket payload"           required:""`
+	Buckets            int    `default:"4"     help:"number of buckets to fill into"       required:""`
+	PayloadSize        int    `default:"1000"  help:"size of the bucket payload"           required:""`
 	OutputPath         string `default:"tmp/"  help:"output path for all the sqlite files" required:""`
 	DropOnBackpressure bool   `default:"false" help:"drop data instead of blocking when backpressure occurs"`
 }

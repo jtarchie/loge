@@ -30,8 +30,8 @@ type Buckets struct {
 }
 
 const (
-	flushInterval  = 5 * time.Second
-	maxBatchInsert = 500 // max rows per batch INSERT
+	flushInterval  = 1 * time.Second // Flush frequently to reduce memory
+	maxBatchInsert = 500              // max rows per batch INSERT
 	enqueueTimeout = 100 * time.Millisecond
 	enqueueRetries = 3
 )
@@ -62,7 +62,7 @@ var encoderPool = sync.Pool{
 }
 
 // copyBufferPool holds reusable buffers for io.CopyBuffer
-const copyBufferSize = 32 * 1024 // 32KB buffer
+const copyBufferSize = 8 * 1024 // 8KB buffer - smaller to reduce memory
 
 var copyBufferPool = sync.Pool{
 	New: func() any {
@@ -106,8 +106,8 @@ func NewBuckets(
 	// Create a cancellable context for shutdown
 	ctx, cancel := context.WithCancel(ctx)
 
-	// Larger buffer: size * payloadSize for better burst handling
-	receiver := make(chan Payload, size*payloadSize)
+	// Small buffer to reduce memory - trades throughput for lower memory usage
+	receiver := make(chan Payload, size)
 
 	compressors := worker.NewWithContext(ctx, size, max(size/2, 2), func(_ int, filename string) {
 		err := compress(filename)
@@ -289,14 +289,14 @@ func flusher(payloads []Payload, outputDir string, prefix string) (string, error
 		_ = client.Close()
 	}()
 
-	// Performance pragmas - since we compress atomically, we don't need durability here
+	// Performance pragmas - trade speed for lower memory usage
 	_, err = client.Exec(`
 		PRAGMA journal_mode = OFF;
 		PRAGMA synchronous = OFF;
 		PRAGMA locking_mode = EXCLUSIVE;
-		PRAGMA temp_store = MEMORY;
-		PRAGMA cache_size = -64000;
-		PRAGMA mmap_size = 268435456;
+		PRAGMA temp_store = FILE;
+		PRAGMA cache_size = -8000;
+		PRAGMA mmap_size = 33554432;
 	`)
 	if err != nil {
 		return "", fmt.Errorf("could not set pragmas %q: %w", filename, err)

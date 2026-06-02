@@ -7,13 +7,13 @@ import (
 	"regexp"
 
 	"github.com/georgysavva/scany/v2/sqlscan"
-	"github.com/hashicorp/golang-lru/v2/simplelru"
+	lru "github.com/hashicorp/golang-lru/v2"
 	filewatcher "github.com/jtarchie/loge/file_watcher"
 	"github.com/samber/lo"
 )
 
 type Local struct {
-	cache     *simplelru.LRU[string, *sql.DB]
+	cache     *lru.Cache[string, *sql.DB]
 	outputDir string
 	watcher   *filewatcher.FileWatcher
 }
@@ -28,7 +28,7 @@ func NewLocal(
 
 	const numCachedDBs = 10
 
-	cache, err := simplelru.NewLRU[string, *sql.DB](numCachedDBs, func(_ string, client *sql.DB) {
+	cache, err := lru.NewWithEvict[string, *sql.DB](numCachedDBs, func(_ string, client *sql.DB) {
 		_ = client.Close()
 	})
 	if err != nil {

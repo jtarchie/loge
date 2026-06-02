@@ -34,6 +34,7 @@ type CLI struct {
 	CompactInterval    time.Duration `default:"30s"   help:"how often to compact small files into segments (0 disables)"`
 	CompactMinFiles    int           `default:"8"     help:"minimum number of flush files before a compaction pass runs"`
 	Durable            bool          `default:"true"  help:"write-ahead log each payload (fsync) before acknowledging; disable for faster, lossy-on-crash ingest"`
+	CheckpointInterval time.Duration `default:"2s"    help:"how often to fsync new segments and prune the write-ahead log"`
 }
 
 func (c *CLI) Run() error {
@@ -54,28 +55,48 @@ func (c *CLI) Run() error {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 
-	buckets, err := NewBuckets(ctx, c.Buckets, c.PayloadSize, c.OutputPath, c.DropOnBackpressure,
-		WithFlushInterval(c.FlushInterval))
+	// Optional write-ahead log + checkpointer: durably record (and fsync) each
+	// payload before acknowledging it, replay any segments left by a previous
+	// crash, and keep the log bounded by pruning segments once their data is
+	// durably in a queryable segment.
+	var (
+		wal          *WAL
+		checkpointer *Checkpointer
+		walDir       = filepath.Join(c.OutputPath, "wal")
+	)
+
+	bucketOpts := []BucketOption{WithFlushInterval(c.FlushInterval)}
+
+	// Durable acknowledgement requires the payload to reach a segment, so it is
+	// incompatible with dropping on backpressure; durability wins.
+	dropOnBackpressure := c.DropOnBackpressure
+
+	if c.Durable {
+		if dropOnBackpressure {
+			slog.Warn("ignoring --drop-on-backpressure because --durable is set")
+
+			dropOnBackpressure = false
+		}
+
+		wal, err = OpenWAL(walDir)
+		if err != nil {
+			return fmt.Errorf("could not open write-ahead log: %w", err)
+		}
+
+		checkpointer = NewCheckpointer(wal, c.CheckpointInterval)
+		bucketOpts = append(bucketOpts, WithWAL(wal), WithDurableReport(checkpointer.Report))
+	}
+
+	buckets, err := NewBuckets(ctx, c.Buckets, c.PayloadSize, c.OutputPath, dropOnBackpressure, bucketOpts...)
 	if err != nil {
 		return fmt.Errorf("could not create buckets: %w", err)
 	}
 
-	// Background compaction merges the many small flush files into fewer,
-	// larger indexed segments. Disabled when the interval is non-positive.
-	if c.CompactInterval > 0 {
-		compactor := NewCompactor(c.OutputPath, c.CompactMinFiles, 0, c.CompactInterval)
-		go compactor.Run(ctx)
-	}
-
-	// Optional write-ahead log: durably record (and fsync) each payload before
-	// acknowledging it, and replay any segments left by a previous crash.
-	var wal *WAL
-
-	walDir := filepath.Join(c.OutputPath, "wal")
-
+	// Replay segments left by a previous crash through the pipeline without
+	// re-logging them.
 	if c.Durable {
-		recovered, err := ReplayWAL(walDir, func(payload *Payload) {
-			buckets.Append(*payload)
+		recovered, err := ReplaySegments(wal.Recovered(), func(payload *Payload) {
+			buckets.appendReplay(*payload)
 		})
 		if err != nil {
 			return fmt.Errorf("could not replay write-ahead log: %w", err)
@@ -84,11 +105,13 @@ func (c *CLI) Run() error {
 		if recovered > 0 {
 			slog.Info("replayed write-ahead log", slog.Int("payloads", recovered))
 		}
+	}
 
-		wal, err = OpenWAL(walDir)
-		if err != nil {
-			return fmt.Errorf("could not open write-ahead log: %w", err)
-		}
+	// Background compaction merges the many small flush files into fewer,
+	// larger indexed segments. Disabled when the interval is non-positive.
+	if c.CompactInterval > 0 {
+		compactor := NewCompactor(c.OutputPath, c.CompactMinFiles, 0, c.CompactInterval)
+		go compactor.Run(ctx)
 	}
 
 	router := echo.New()
@@ -113,22 +136,18 @@ func (c *CLI) Run() error {
 			return echo.NewHTTPError(http.StatusBadRequest, msg)
 		}
 
-		if wal != nil {
-			// Durably record the payload before acknowledging so a crash cannot
-			// lose acknowledged data (at-least-once).
-			if _, err := wal.Append(payload); err != nil {
-				return fmt.Errorf("could not write to write-ahead log: %w", err)
-			}
+		// Append durably logs the payload first when the WAL is enabled,
+		// returning an error if it could not be persisted.
+		if err := buckets.Append(*payload); err != nil {
+			return fmt.Errorf("could not append payload: %w", err)
+		}
 
-			buckets.Append(*payload)
-
+		if c.Durable {
+			// 200 OK: the payload is durably logged (at-least-once).
 			return context.NoContent(http.StatusOK)
 		}
 
-		buckets.Append(*payload)
-
-		// 202 Accepted: the payload is queued for asynchronous flushing and is
-		// not yet durably on disk (write-ahead log disabled).
+		// 202 Accepted: queued for asynchronous flushing, not yet durable.
 		return context.NoContent(http.StatusAccepted)
 	})
 
@@ -196,15 +215,21 @@ func (c *CLI) Run() error {
 		return serverErr
 	}
 
-	// After server stops, gracefully close buckets to flush all remaining data
+	// After server stops, gracefully close buckets to flush all remaining data.
+	// This drains the flush/compress pipeline (which feeds the checkpointer),
+	// so it must happen before the checkpointer is stopped.
 	slog.Info("flushing remaining data...")
 	if err := buckets.Close(); err != nil {
 		return fmt.Errorf("could not close buckets: %w", err)
 	}
 
-	// Buckets.Close flushed everything durably, so the write-ahead log is no
-	// longer needed: stop it and remove its segments. (On a crash the segments
-	// survive and are replayed on the next start.)
+	// Buckets.Close flushed everything, so the write-ahead log is no longer
+	// needed: stop the checkpointer, close the log, and remove its segments.
+	// (On a crash the segments survive and are replayed on the next start.)
+	if checkpointer != nil {
+		checkpointer.Stop()
+	}
+
 	if wal != nil {
 		if err := wal.Close(); err != nil {
 			return fmt.Errorf("could not close write-ahead log: %w", err)

@@ -64,6 +64,13 @@ func (c *CLI) Run() error {
 			_ = context.Request().Body.Close()
 		}()
 
+		// Reject malformed payloads (empty streams, missing labels/values)
+		// instead of silently persisting empty or inconsistent files.
+		if msg, ok := payload.Valid(); !ok {
+			PutPayload(payload)
+			return echo.NewHTTPError(http.StatusBadRequest, msg)
+		}
+
 		// Note: payload ownership transfers to buckets, don't return to pool here
 		// The bucket worker will handle the payload lifecycle
 		buckets.Append(*payload)

@@ -100,6 +100,33 @@ var _ = Describe("Running the application", func() {
 		Expect(labelResponse.Data).To(ConsistOf(knownLabels))
 	})
 
+	It("rejects an invalid JSON payload with 400", func() {
+		outputPath, err := os.MkdirTemp("", "")
+		Expect(err).NotTo(HaveOccurred())
+
+		port, err := freeport.GetFreePort()
+		Expect(err).NotTo(HaveOccurred())
+
+		StartCLI(
+			"--port", strconv.Itoa(port),
+			"--buckets", "1",
+			"--payload-size", "1",
+			"--output-path", outputPath,
+		)
+
+		httpClient := req.C()
+
+		Eventually(func() int {
+			response, _ := httpClient.R().
+				SetRetryCount(3).
+				SetContentType("application/json").
+				SetBodyString(`{"streams":[]}`).
+				Post(fmt.Sprintf("http://localhost:%d/api/v1/push", port))
+
+			return response.StatusCode
+		}).Should(Equal(http.StatusBadRequest))
+	})
+
 	It("accepts a MsgPack payload", func() {
 		outputPath, err := os.MkdirTemp("", "")
 		Expect(err).NotTo(HaveOccurred())

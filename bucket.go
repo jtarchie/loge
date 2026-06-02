@@ -19,15 +19,40 @@ import (
 	_ "github.com/mattn/go-sqlite3"
 )
 
+// seqPayload carries a payload through the receiver channel together with its
+// write-ahead-log sequence number (0 when durability is disabled or for
+// replayed payloads).
+type seqPayload struct {
+	seq     uint64
+	payload Payload
+}
+
+// flushJob is a batch handed to a flusher worker, with the WAL sequence of each
+// payload kept alongside so durability can be reported once the batch is
+// flushed and compressed.
+type flushJob struct {
+	payloads []Payload
+	seqs     []uint64
+}
+
+// compressJob is a flushed file plus the sequences it contains, handed to a
+// compressor worker.
+type compressJob struct {
+	filename string
+	seqs     []uint64
+}
+
 type Buckets struct {
-	receiver           chan Payload
+	receiver           chan seqPayload
 	ctx                context.Context
 	cancel             context.CancelFunc
 	wg                 sync.WaitGroup
-	flushers           *worker.Worker[[]Payload]
-	compressors        *worker.Worker[string]
+	flushers           *worker.Worker[flushJob]
+	compressors        *worker.Worker[compressJob]
 	dropOnBackpressure bool
 	flushInterval      time.Duration
+	wal                *WAL
+	onDurable          func(filename string, seqs []uint64)
 }
 
 const (
@@ -47,6 +72,23 @@ func WithFlushInterval(interval time.Duration) BucketOption {
 		if interval > 0 {
 			b.flushInterval = interval
 		}
+	}
+}
+
+// WithWAL makes Append durably log each payload (and assign it a sequence
+// number) before queueing it.
+func WithWAL(wal *WAL) BucketOption {
+	return func(b *Buckets) {
+		b.wal = wal
+	}
+}
+
+// WithDurableReport registers a callback invoked after a file has been flushed
+// and compressed, reporting the WAL sequence numbers it contains so they can be
+// checkpointed.
+func WithDurableReport(fn func(filename string, seqs []uint64)) BucketOption {
+	return func(b *Buckets) {
+		b.onDurable = fn
 	}
 }
 
@@ -96,31 +138,11 @@ func NewBuckets(
 	// Create a cancellable context for shutdown
 	ctx, cancel := context.WithCancel(ctx)
 
-	// Small buffer to reduce memory - trades throughput for lower memory usage
-	receiver := make(chan Payload, size)
-
-	compressors := worker.NewWithContext(ctx, size, max(size/2, 2), func(_ int, filename string) {
-		err := compress(filename)
-		if err != nil {
-			slog.Error("could not compress file", slog.String("filename", filename), slog.String("error", err.Error()))
-		}
-	})
-
-	flushers := worker.NewWithContext(ctx, size, max(size/2, 2), func(index int, payloads []Payload) {
-		filename, err := flusher(payloads, outputPath, fmt.Sprintf("bucket-%d", index))
-		if err != nil {
-			slog.Error("could not flush payloads", slog.Int("index", index), slog.String("error", err.Error()))
-		} else {
-			compressors.Enqueue(filename)
-		}
-	})
-
 	buckets := &Buckets{
-		receiver:           receiver,
+		// Small buffer to reduce memory - trades throughput for lower memory usage
+		receiver:           make(chan seqPayload, size),
 		ctx:                ctx,
 		cancel:             cancel,
-		flushers:           flushers,
-		compressors:        compressors,
 		dropOnBackpressure: dropOnBackpressure,
 		flushInterval:      defaultFlushInterval,
 	}
@@ -129,20 +151,53 @@ func NewBuckets(
 		opt(buckets)
 	}
 
+	buckets.compressors = worker.NewWithContext(ctx, size, max(size/2, 2), func(_ int, job compressJob) {
+		if err := compress(job.filename); err != nil {
+			slog.Error("could not compress file", slog.String("filename", job.filename), slog.String("error", err.Error()))
+
+			return
+		}
+
+		// The flushed file is now a durable, queryable segment; report its
+		// sequences so the write-ahead log can be checkpointed.
+		if buckets.onDurable != nil {
+			buckets.onDurable(job.filename+".zst", job.seqs)
+		}
+	})
+
+	buckets.flushers = worker.NewWithContext(ctx, size, max(size/2, 2), func(index int, job flushJob) {
+		filename, err := flusher(job.payloads, outputPath, fmt.Sprintf("bucket-%d", index))
+		if err != nil {
+			slog.Error("could not flush payloads", slog.Int("index", index), slog.String("error", err.Error()))
+		} else {
+			buckets.compressors.Enqueue(compressJob{filename: filename, seqs: job.seqs})
+		}
+	})
+
 	for index := range size {
 		buckets.wg.Add(1)
-		go buckets.bucketWorker(index, payloadSize, flushers)
+		go buckets.bucketWorker(index, payloadSize, buckets.flushers)
 	}
 
 	return buckets, nil
 }
 
-func (b *Buckets) bucketWorker(index int, payloadSize int, flushers *worker.Worker[[]Payload]) {
+func (b *Buckets) bucketWorker(index int, payloadSize int, flushers *worker.Worker[flushJob]) {
 	defer b.wg.Done()
 
 	payloads := make([]Payload, 0, payloadSize)
+	seqs := make([]uint64, 0, payloadSize)
 	timer := time.NewTimer(b.flushInterval)
 	defer timer.Stop()
+
+	reset := func() {
+		payloads = make([]Payload, 0, payloadSize)
+		seqs = make([]uint64, 0, payloadSize)
+	}
+
+	job := func() flushJob {
+		return flushJob{payloads: payloads, seqs: seqs}
+	}
 
 	flush := func(blocking bool) {
 		if len(payloads) == 0 {
@@ -156,19 +211,19 @@ func (b *Buckets) bucketWorker(index int, payloadSize int, flushers *worker.Work
 		// explicitly opted into dropping on backpressure.
 		if !blocking {
 			if b.dropOnBackpressure {
-				if !flushers.Enqueue(payloads, worker.WithTimeout(time.Second)) {
+				if !flushers.Enqueue(job(), worker.WithTimeout(time.Second)) {
 					slog.Warn("shutdown flush timeout, dropping data",
 						slog.Int("bucket", index),
 						slog.Int("payloads", len(payloads)),
 					)
 				}
-				payloads = make([]Payload, 0, payloadSize)
+				reset()
 
 				return
 			}
 
-			flushers.Enqueue(payloads) // blocks until the flusher accepts it
-			payloads = make([]Payload, 0, payloadSize)
+			flushers.Enqueue(job()) // blocks until the flusher accepts it
+			reset()
 
 			return
 		}
@@ -176,8 +231,8 @@ func (b *Buckets) bucketWorker(index int, payloadSize int, flushers *worker.Work
 		// Normal operation: retry with exponential backoff
 		for attempt := range enqueueRetries {
 			timeout := enqueueTimeout * time.Duration(1<<attempt)
-			if flushers.Enqueue(payloads, worker.WithTimeout(timeout)) {
-				payloads = make([]Payload, 0, payloadSize)
+			if flushers.Enqueue(job(), worker.WithTimeout(timeout)) {
+				reset()
 				return
 			}
 			slog.Warn("flusher backpressure, retrying",
@@ -193,7 +248,7 @@ func (b *Buckets) bucketWorker(index int, payloadSize int, flushers *worker.Work
 				slog.Int("bucket", index),
 				slog.Int("payloads", len(payloads)),
 			)
-			payloads = make([]Payload, 0, payloadSize)
+			reset()
 			return
 		}
 
@@ -202,8 +257,13 @@ func (b *Buckets) bucketWorker(index int, payloadSize int, flushers *worker.Work
 			slog.Int("bucket", index),
 			slog.Int("payloads", len(payloads)),
 		)
-		flushers.Enqueue(payloads) // blocks until space available
-		payloads = make([]Payload, 0, payloadSize)
+		flushers.Enqueue(job()) // blocks until space available
+		reset()
+	}
+
+	add := func(item seqPayload) {
+		payloads = append(payloads, item.payload)
+		seqs = append(seqs, item.seq)
 	}
 
 	for {
@@ -213,13 +273,13 @@ func (b *Buckets) bucketWorker(index int, payloadSize int, flushers *worker.Work
 			// Drain any remaining items from receiver
 			for {
 				select {
-				case payload, ok := <-b.receiver:
+				case item, ok := <-b.receiver:
 					if !ok {
 						// Receiver closed, do final flush and exit
 						flush(false)
 						return
 					}
-					payloads = append(payloads, payload)
+					add(item)
 					if len(payloads) >= payloadSize {
 						flush(false)
 					}
@@ -234,14 +294,14 @@ func (b *Buckets) bucketWorker(index int, payloadSize int, flushers *worker.Work
 			flush(true)
 			timer.Reset(b.flushInterval)
 
-		case payload, ok := <-b.receiver:
+		case item, ok := <-b.receiver:
 			if !ok {
 				// Channel closed, flush and exit
 				flush(false)
 				return
 			}
 
-			payloads = append(payloads, payload)
+			add(item)
 			timer.Reset(b.flushInterval)
 
 			if len(payloads) >= payloadSize {
@@ -251,8 +311,31 @@ func (b *Buckets) bucketWorker(index int, payloadSize int, flushers *worker.Work
 	}
 }
 
-func (b *Buckets) Append(payload Payload) {
-	b.receiver <- payload
+// Append queues a payload for flushing. When a write-ahead log is attached the
+// payload is durably logged (and assigned a sequence number) before queueing,
+// and any error is returned so the caller can reject the request; otherwise it
+// always succeeds.
+func (b *Buckets) Append(payload Payload) error {
+	seq := uint64(0)
+
+	if b.wal != nil {
+		assigned, err := b.wal.Append(&payload)
+		if err != nil {
+			return fmt.Errorf("could not write to write-ahead log: %w", err)
+		}
+
+		seq = assigned
+	}
+
+	b.receiver <- seqPayload{seq: seq, payload: payload}
+
+	return nil
+}
+
+// appendReplay queues a payload without logging it to the write-ahead log,
+// used when replaying recovered WAL segments on startup.
+func (b *Buckets) appendReplay(payload Payload) {
+	b.receiver <- seqPayload{seq: 0, payload: payload}
 }
 
 // Close gracefully shuts down all bucket workers, flushers, and compressors.

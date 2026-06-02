@@ -541,14 +541,23 @@ func batchInsertStreams(tx *sql.Tx, streams []streamEntry) error {
 }
 
 func compress(filename string) error {
-	output, err := os.Create(filename + ".zst.partial")
+	partial := filename + ".zst.partial"
+	final := filename + ".zst"
+
+	output, err := os.Create(partial)
 	if err != nil {
 		return fmt.Errorf("could not create file: %w", err)
 	}
 
+	// Only publish the compressed file if everything below succeeds; on any
+	// failure remove the partial and leave the source file in place so it can
+	// be retried instead of publishing a truncated, corrupt archive.
+	finalized := false
 	defer func() {
 		_ = output.Close()
-		_ = os.Rename(filename+".zst.partial", filename+".zst")
+		if !finalized {
+			_ = os.Remove(partial)
+		}
 	}()
 
 	input, err := os.Open(filename)
@@ -574,9 +583,6 @@ func compress(filename string) error {
 	if err != nil {
 		return fmt.Errorf("could not load writer: %w", err)
 	}
-	defer func() {
-		_ = writer.Close()
-	}()
 
 	// Use pooled buffer for copying
 	bufPtr := copyBufferPool.Get().(*[]byte)
@@ -584,12 +590,56 @@ func compress(filename string) error {
 
 	_, err = io.CopyBuffer(writer, input, *bufPtr)
 	if err != nil {
+		_ = writer.Close()
 		return fmt.Errorf("could not compress file: %w", err)
+	}
+
+	// Close the seekable writer to flush all zstd frames and the seek table
+	// before syncing and publishing.
+	if err := writer.Close(); err != nil {
+		return fmt.Errorf("could not close writer: %w", err)
+	}
+
+	// Ensure the compressed bytes are durably on disk before we publish the
+	// file and delete the source.
+	if err := output.Sync(); err != nil {
+		return fmt.Errorf("could not sync compressed file: %w", err)
+	}
+	if err := output.Close(); err != nil {
+		return fmt.Errorf("could not close compressed file: %w", err)
+	}
+
+	if err := os.Rename(partial, final); err != nil {
+		return fmt.Errorf("could not finalize compressed file: %w", err)
+	}
+	finalized = true
+
+	// Make the rename durable so the published file survives a crash.
+	if err := syncDir(final); err != nil {
+		return fmt.Errorf("could not sync directory: %w", err)
 	}
 
 	err = os.Remove(filename)
 	if err != nil {
 		return fmt.Errorf("could not remove original file: %w", err)
+	}
+
+	return nil
+}
+
+// syncDir fsyncs the directory containing path so a rename/create within it
+// is durable across a crash.
+func syncDir(path string) error {
+	dir, err := os.Open(filepath.Dir(path))
+	if err != nil {
+		return fmt.Errorf("could not open directory: %w", err)
+	}
+	defer func() {
+		_ = dir.Close()
+	}()
+
+	if err := dir.Sync(); err != nil {
+		return fmt.Errorf("could not sync directory: %w", err)
 	}
 
 	return nil

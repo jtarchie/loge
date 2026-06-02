@@ -38,12 +38,19 @@ var _ = Describe("WAL", func() {
 		return lines
 	}
 
-	It("round-trips appended payloads in order", func() {
+	appendOK := func(wal *loge.WAL, line string) uint64 {
+		seq, err := wal.Append(makePayload(line))
+		Expect(err).NotTo(HaveOccurred())
+
+		return seq
+	}
+
+	It("round-trips appended payloads in order with increasing sequences", func() {
 		wal, err := loge.OpenWAL(dir)
 		Expect(err).NotTo(HaveOccurred())
 
-		Expect(wal.Append(makePayload("one"))).To(Succeed())
-		Expect(wal.Append(makePayload("two"))).To(Succeed())
+		Expect(appendOK(wal, "one")).To(Equal(uint64(1)))
+		Expect(appendOK(wal, "two")).To(Equal(uint64(2)))
 		Expect(wal.Close()).To(Succeed())
 
 		Expect(replayLines()).To(Equal([]string{"one", "two"}))
@@ -52,7 +59,7 @@ var _ = Describe("WAL", func() {
 	It("stops at a torn tail without error and keeps intact records", func() {
 		wal, err := loge.OpenWAL(dir)
 		Expect(err).NotTo(HaveOccurred())
-		Expect(wal.Append(makePayload("intact"))).To(Succeed())
+		appendOK(wal, "intact")
 		Expect(wal.Close()).To(Succeed())
 
 		segments, err := filepath.Glob(filepath.Join(dir, "wal-*.log"))
@@ -69,10 +76,39 @@ var _ = Describe("WAL", func() {
 		Expect(replayLines()).To(Equal([]string{"intact"}))
 	})
 
+	It("deletes sealed segments once their sequences are marked durable", func() {
+		wal, err := loge.OpenWAL(dir)
+		Expect(err).NotTo(HaveOccurred())
+		defer func() { _ = wal.Close() }()
+
+		// First sealed segment covers seq 1..2.
+		appendOK(wal, "a")
+		appendOK(wal, "b")
+		wal.Rotate()
+
+		// Second sealed segment covers seq 3.
+		appendOK(wal, "c")
+		wal.Rotate()
+
+		segments, _ := filepath.Glob(filepath.Join(dir, "wal-*.log"))
+		Expect(len(segments)).To(BeNumerically(">=", 2))
+
+		// Marking seq 3 alone must NOT delete anything: the watermark cannot
+		// pass the gap at seq 1/2.
+		Expect(wal.MarkDurable([]uint64{3})).To(Succeed())
+		before, _ := filepath.Glob(filepath.Join(dir, "wal-*.log"))
+		Expect(len(before)).To(BeNumerically(">=", 2))
+
+		// Now mark 1 and 2: watermark advances to 3, both sealed segments drop.
+		Expect(wal.MarkDurable([]uint64{1, 2})).To(Succeed())
+		after, _ := filepath.Glob(filepath.Join(dir, "wal-*.log"))
+		Expect(after).To(BeEmpty())
+	})
+
 	It("removes all segments on RemoveWAL", func() {
 		wal, err := loge.OpenWAL(dir)
 		Expect(err).NotTo(HaveOccurred())
-		Expect(wal.Append(makePayload("x"))).To(Succeed())
+		appendOK(wal, "x")
 		Expect(wal.Close()).To(Succeed())
 
 		Expect(loge.RemoveWAL(dir)).To(Succeed())

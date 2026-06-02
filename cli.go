@@ -116,7 +116,7 @@ func (c *CLI) Run() error {
 		if wal != nil {
 			// Durably record the payload before acknowledging so a crash cannot
 			// lose acknowledged data (at-least-once).
-			if err := wal.Append(payload); err != nil {
+			if _, err := wal.Append(payload); err != nil {
 				return fmt.Errorf("could not write to write-ahead log: %w", err)
 			}
 

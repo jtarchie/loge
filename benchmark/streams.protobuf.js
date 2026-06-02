@@ -153,6 +153,6 @@ export default function () {
   let res = http.post("http://localhost:6500/api/v1/push", body.buffer, params);
 
   check(res, {
-    "is status 200": (r) => r.status === 200,
+    "is status 202": (r) => r.status === 202,
   });
 }

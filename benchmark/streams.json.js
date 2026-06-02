@@ -64,6 +64,6 @@ export default function () {
 
   // Check for HTTP status code 200
   check(res, {
-    "is status 200": (r) => r.status === 200,
+    "is status 202": (r) => r.status === 202,
   });
 }

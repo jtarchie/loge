@@ -5,9 +5,11 @@ import (
 	"database/sql"
 	"errors"
 	"fmt"
+	"log/slog"
 	"os"
 	"regexp"
 	"sort"
+	"strings"
 	"sync"
 
 	"github.com/georgysavva/scany/v2/sqlscan"
@@ -16,33 +18,81 @@ import (
 	"github.com/samber/lo"
 )
 
+const (
+	defaultCachedDBs        = 64
+	defaultQueryConcurrency = 8
+	defaultVFS              = "zstd"
+)
+
 type Local struct {
-	cache      *lru.Cache[string, *sql.DB]
-	outputDir  string
-	watcher    *filewatcher.FileWatcher
-	lineSearch sync.Map // filename -> bool: whether the file has the line_search index
+	cache       *lru.Cache[string, *sql.DB]
+	outputDir   string
+	watcher     *filewatcher.FileWatcher
+	catalog     *Catalog
+	vfsName     string
+	concurrency int
+	lineSearch  sync.Map // dsn -> bool: whether the source has the line_search index
 }
 
-func NewLocal(
-	outputPath string,
-) (*Local, error) {
-	watcher, err := filewatcher.New(outputPath, regexp.MustCompile(`\.sqlite\.zst$`))
+// Option configures a Local manager.
+type Option func(*Local)
+
+// WithCatalog makes the manager prune compacted segments via the catalog (and
+// resolve their local/remote location) instead of tracking them with the file
+// watcher; the watcher then only tracks ephemeral local flush files.
+func WithCatalog(catalog *Catalog) Option {
+	return func(l *Local) {
+		l.catalog = catalog
+	}
+}
+
+// WithVFS sets the sqlite VFS name used to open sources (e.g. a cache-enabled
+// "zstdcache" VFS for HTTP segments). Defaults to "zstd".
+func WithVFS(name string) Option {
+	return func(l *Local) {
+		if name != "" {
+			l.vfsName = name
+		}
+	}
+}
+
+// WithQueryConcurrency bounds how many sources a query opens in parallel.
+func WithQueryConcurrency(n int) Option {
+	return func(l *Local) {
+		if n > 0 {
+			l.concurrency = n
+		}
+	}
+}
+
+func NewLocal(outputPath string, opts ...Option) (*Local, error) {
+	local := &Local{
+		outputDir:   outputPath,
+		vfsName:     defaultVFS,
+		concurrency: defaultQueryConcurrency,
+	}
+
+	for _, opt := range opts {
+		opt(local)
+	}
+
+	// With a catalog, segments are tracked there and the watcher only needs the
+	// ephemeral local flush files; without one, the watcher tracks everything.
+	pattern := `\.sqlite\.zst$`
+	if local.catalog != nil {
+		pattern = `bucket-.*\.sqlite\.zst$`
+	}
+
+	watcher, err := filewatcher.New(outputPath, regexp.MustCompile(pattern))
 	if err != nil {
 		return nil, fmt.Errorf("could not start watcher: %w", err)
 	}
 
-	const numCachedDBs = 64
+	local.watcher = watcher
 
-	local := &Local{
-		outputDir: outputPath,
-		watcher:   watcher,
-	}
-
-	cache, err := lru.NewWithEvict[string, *sql.DB](numCachedDBs, func(filename string, client *sql.DB) {
+	cache, err := lru.NewWithEvict[string, *sql.DB](defaultCachedDBs, func(dsn string, client *sql.DB) {
 		_ = client.Close()
-		// Drop the cached line_search answer so the map stays bounded by the
-		// handle cache.
-		local.lineSearch.Delete(filename)
+		local.lineSearch.Delete(dsn)
 	})
 	if err != nil {
 		return nil, fmt.Errorf("could not start cache: %w", err)
@@ -64,72 +114,173 @@ func (m *Local) Close() error {
 	return nil
 }
 
-func (m *Local) execute(fun func(filename string, client *sql.DB) error) error {
-	err := m.watcher.Iterate(func(filename string) error {
-		// The file may have been compacted or cleaned up between the watcher
-		// learning about it and this query running; skip it rather than
-		// failing the whole query.
-		if _, statErr := os.Stat(filename); errors.Is(statErr, os.ErrNotExist) {
-			return nil
-		}
+func isHTTP(dsn string) bool {
+	return strings.HasPrefix(dsn, "http://") || strings.HasPrefix(dsn, "https://")
+}
 
-		client, ok := m.cache.Get(filename)
-		if !ok {
-			var err error
+// querySource is one file or segment to query: a local path or a remote URL.
+// prePruned is true when the catalog already confirmed it overlaps the window.
+type querySource struct {
+	id        string
+	dsn       string
+	prePruned bool
+}
 
-			client, err = sql.Open("sqlite3", filename+"?vfs=zstd")
-			if err != nil {
-				return fmt.Errorf("could not open sqlite3 (%q): %w", filename, err)
-			}
+// watcherSources returns the local files the watcher is tracking.
+func (m *Local) watcherSources() []querySource {
+	var sources []querySource
 
-			// sqlitezstd is a read-only VFS and expects a single connection per
-			// database handle.
-			client.SetMaxOpenConns(1)
-
-			m.cache.Add(filename, client)
-		}
-
-		err := fun(filename, client)
-		if err != nil {
-			return fmt.Errorf("could not execute (%q): %w", filename, err)
-		}
+	_ = m.watcher.Iterate(func(filename string) error {
+		sources = append(sources, querySource{id: filename, dsn: filename})
 
 		return nil
 	})
-	if err != nil {
-		return fmt.Errorf("could not execute manager: %w", err)
+
+	return sources
+}
+
+// sources returns every source to query for the [start,end] window (0 meaning
+// unbounded): local flush files from the watcher plus catalog segments pruned
+// to the window (resolved to a local copy when present, else their remote URL).
+func (m *Local) sources(start, end int64) ([]querySource, error) {
+	sources := m.watcherSources()
+
+	if m.catalog != nil {
+		segments, err := m.catalog.Overlapping(start, end)
+		if err != nil {
+			return nil, fmt.Errorf("could not prune segments: %w", err)
+		}
+
+		for _, segment := range segments {
+			dsn := segment.RemoteURL
+
+			if segment.LocalPath != "" {
+				if _, statErr := os.Stat(segment.LocalPath); statErr == nil {
+					dsn = segment.LocalPath // prefer a local copy when present
+				}
+			}
+
+			if dsn == "" {
+				continue
+			}
+
+			sources = append(sources, querySource{id: segment.ID, dsn: dsn, prePruned: true})
+		}
 	}
 
-	return nil
+	return sources, nil
+}
+
+// forEach runs fn over sources with bounded concurrency. A failure on one
+// source is collected (so the result degrades to the sources that did work,
+// e.g. local when S3 is unreachable) rather than failing the whole query.
+func (m *Local) forEach(sources []querySource, fn func(querySource, *sql.DB) error) error {
+	concurrency := m.concurrency
+	if concurrency < 1 {
+		concurrency = 1
+	}
+
+	var (
+		wg   sync.WaitGroup
+		mu   sync.Mutex
+		errs []error
+	)
+
+	sem := make(chan struct{}, concurrency)
+
+	for _, src := range sources {
+		wg.Add(1)
+		sem <- struct{}{}
+
+		go func(src querySource) {
+			defer wg.Done()
+			defer func() { <-sem }()
+
+			if err := m.withClient(src, fn); err != nil {
+				mu.Lock()
+				errs = append(errs, fmt.Errorf("source %q: %w", src.id, err))
+				mu.Unlock()
+			}
+		}(src)
+	}
+
+	wg.Wait()
+
+	return errors.Join(errs...)
+}
+
+func (m *Local) withClient(src querySource, fn func(querySource, *sql.DB) error) error {
+	// A local file may have been compacted/rotated away between resolution and
+	// now; skip it rather than failing.
+	if !isHTTP(src.dsn) {
+		if _, statErr := os.Stat(src.dsn); errors.Is(statErr, os.ErrNotExist) {
+			return nil
+		}
+	}
+
+	client, ok := m.cache.Get(src.dsn)
+	if !ok {
+		var err error
+
+		client, err = sql.Open("sqlite3", src.dsn+"?vfs="+m.vfsName)
+		if err != nil {
+			return fmt.Errorf("could not open (%q): %w", src.dsn, err)
+		}
+
+		// sqlitezstd is read-only and expects a single connection per handle.
+		client.SetMaxOpenConns(1)
+
+		m.cache.Add(src.dsn, client)
+	}
+
+	return fn(src, client)
 }
 
 func (m *Local) Labels() ([]string, error) {
-	var foundLabels []string
+	seen := map[string]struct{}{}
 
-	err := m.execute(func(_ string, client *sql.DB) error {
+	// Segment label keys come from the catalog with no file/S3 access.
+	if m.catalog != nil {
+		keys, err := m.catalog.LabelKeys()
+		if err != nil {
+			return nil, fmt.Errorf("could not read catalog labels: %w", err)
+		}
+
+		for _, key := range keys {
+			seen[key] = struct{}{}
+		}
+	}
+
+	// Plus the (local) files the watcher tracks.
+	var (
+		mu    sync.Mutex
+		found []string
+	)
+
+	if err := m.forEach(m.watcherSources(), func(_ querySource, client *sql.DB) error {
 		var labels []string
 
 		err := sqlscan.Select(context.TODO(), client, &labels, `
-			SELECT
-				DISTINCT json_each.key
-			FROM labels,
-				json_each(labels.payload);
+			SELECT DISTINCT json_each.key FROM labels, json_each(labels.payload);
 		`)
 		if err != nil {
 			return fmt.Errorf("could not scan labels: %w", err)
 		}
 
-		foundLabels = append(foundLabels, labels...)
+		mu.Lock()
+		found = append(found, labels...)
+		mu.Unlock()
 
 		return nil
-	})
-	if err != nil {
-		return nil, fmt.Errorf("could not read all labels: %w", err)
+	}); err != nil {
+		slog.Warn("some sources failed while reading labels", slog.String("error", err.Error()))
 	}
 
-	// Files are iterated in a nondeterministic order (sync.Map.Range), so sort
-	// for a stable result across calls.
-	unique := lo.Uniq(foundLabels)
+	for _, key := range found {
+		seen[key] = struct{}{}
+	}
+
+	unique := lo.Keys(seen)
 	sort.Strings(unique)
 
 	return unique, nil

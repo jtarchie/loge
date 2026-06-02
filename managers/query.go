@@ -5,9 +5,11 @@ import (
 	"database/sql"
 	"encoding/json"
 	"fmt"
+	"log/slog"
 	"regexp"
 	"sort"
 	"strings"
+	"sync"
 
 	"github.com/georgysavva/scany/v2/sqlscan"
 )
@@ -66,11 +68,20 @@ func (m *Local) Query(ctx context.Context, req QueryRequest) ([]QueryEntry, erro
 		return nil, err
 	}
 
-	var results []QueryEntry
+	sources, err := m.sources(req.Start, req.End)
+	if err != nil {
+		return nil, err
+	}
 
-	err = m.execute(func(filename string, client *sql.DB) error {
-		// Skip files whose stored time bounds do not overlap the query window.
-		if req.Start != 0 || req.End != 0 {
+	var (
+		mu      sync.Mutex
+		results []QueryEntry
+	)
+
+	joinErr := m.forEach(sources, func(src querySource, client *sql.DB) error {
+		// Catalog segments are already time-pruned; watcher flush files are not,
+		// so prune them by their own stored bounds.
+		if !src.prePruned && (req.Start != 0 || req.End != 0) {
 			overlaps, err := fileOverlaps(ctx, client, req.Start, req.End)
 			if err != nil {
 				return fmt.Errorf("could not read file bounds: %w", err)
@@ -84,7 +95,7 @@ func (m *Local) Query(ctx context.Context, req QueryRequest) ([]QueryEntry, erro
 		// Use the trigram line index to accelerate the line filter on segments
 		// that have it; LIKE still runs as the exact filter so correctness does
 		// not depend on the index.
-		useLineIndex := req.Line != "" && len(req.Line) >= 3 && m.hasLineSearch(ctx, filename, client)
+		useLineIndex := req.Line != "" && len(req.Line) >= 3 && m.hasLineSearch(ctx, src.dsn, client)
 
 		sqlText, args := buildQuery(req, limit, useLineIndex)
 
@@ -92,6 +103,8 @@ func (m *Local) Query(ctx context.Context, req QueryRequest) ([]QueryEntry, erro
 		if err := sqlscan.Select(ctx, client, &rows, sqlText, args...); err != nil {
 			return fmt.Errorf("could not query streams: %w", err)
 		}
+
+		local := make([]QueryEntry, 0, len(rows))
 
 		for _, row := range rows {
 			labels := map[string]string{}
@@ -103,17 +116,23 @@ func (m *Local) Query(ctx context.Context, req QueryRequest) ([]QueryEntry, erro
 				continue
 			}
 
-			results = append(results, QueryEntry{
+			local = append(local, QueryEntry{
 				Timestamp: row.Timestamp,
 				Line:      row.Line,
 				Labels:    labels,
 			})
 		}
 
+		mu.Lock()
+		results = append(results, local...)
+		mu.Unlock()
+
 		return nil
 	})
-	if err != nil {
-		return nil, fmt.Errorf("could not run query: %w", err)
+	if joinErr != nil {
+		// Degrade rather than fail: return whatever sources succeeded (e.g. local
+		// data when S3 is unreachable) and surface the failures as a warning.
+		slog.Warn("some sources failed during query", slog.String("error", joinErr.Error()))
 	}
 
 	// Merge across files: newest first, then cap to the requested limit.

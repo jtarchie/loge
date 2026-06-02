@@ -190,6 +190,74 @@ var _ = Describe("Running the application", func() {
 		})
 		Expect(labelResponse.Data).To(ConsistOf(knownLabels))
 	})
+
+	It("queries pushed logs by label matcher", func() {
+		outputPath, err := os.MkdirTemp("", "")
+		Expect(err).NotTo(HaveOccurred())
+
+		port, err := freeport.GetFreePort()
+		Expect(err).NotTo(HaveOccurred())
+
+		StartCLI(
+			"--port", strconv.Itoa(port),
+			"--buckets", "1",
+			"--payload-size", "1",
+			"--output-path", outputPath,
+		)
+
+		httpClient := req.C()
+		pushURL := fmt.Sprintf("http://localhost:%d/api/v1/push", port)
+		queryURL := fmt.Sprintf("http://localhost:%d/api/v1/query", port)
+
+		base := int64(1_700_000_000_000_000_000)
+		push := func(app, line string, ts int64) {
+			payload := loge.Payload{
+				Streams: loge.Streams{
+					loge.Entry{
+						Stream: loge.Stream{"app": app},
+						Values: loge.Values{loge.Value{strconv.FormatInt(ts, 10), line}},
+					},
+				},
+			}
+
+			Eventually(func() int {
+				response, _ := httpClient.R().SetRetryCount(3).SetBodyJsonMarshal(payload).Post(pushURL)
+
+				return response.StatusCode
+			}).Should(Equal(http.StatusAccepted))
+		}
+
+		push("web", "GET /index 200", base)
+		push("db", "SELECT slow query", base+1000)
+
+		Eventually(func() int {
+			matches, _ := filepath.Glob(filepath.Join(outputPath, "*.sqlite.zst"))
+
+			return len(matches)
+		}, "5s").Should(BeNumerically(">=", 2))
+
+		var queryResponse loge.QueryResponse
+
+		Eventually(func() int {
+			body := map[string]any{
+				"matchers": []map[string]string{{"name": "app", "value": "web", "type": "="}},
+			}
+
+			response, err := httpClient.R().
+				SetBodyJsonMarshal(body).
+				SetSuccessResult(&queryResponse).
+				Post(queryURL)
+			if err != nil || response.StatusCode != http.StatusOK {
+				return -1
+			}
+
+			return len(queryResponse.Data)
+		}, "5s").Should(Equal(1))
+
+		Expect(queryResponse.Status).To(Equal("success"))
+		Expect(queryResponse.Data[0].Labels).To(HaveKeyWithValue("app", "web"))
+		Expect(queryResponse.Data[0].Line).To(Equal("GET /index 200"))
+	})
 })
 
 // nolint: gosec

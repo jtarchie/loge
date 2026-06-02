@@ -10,11 +10,18 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/goccy/go-json"
 	"github.com/jtarchie/loge/managers"
 	_ "github.com/jtarchie/sqlitezstd"
 	"github.com/labstack/echo/v4"
 	"github.com/labstack/echo/v4/middleware"
 )
+
+// QueryResponse is the JSON shape returned by the query endpoint.
+type QueryResponse struct {
+	Status string                `json:"status"`
+	Data   []managers.QueryEntry `json:"data"`
+}
 
 type CLI struct {
 	Port               int    `default:"3000"  help:"start HTTP server on port"            required:""`
@@ -86,6 +93,31 @@ func (c *CLI) Run() error {
 		return response(context, http.StatusOK, &LabelResponse{
 			Status: "success",
 			Data:   labels,
+		})
+	})
+
+	router.POST("/api/v1/query", func(context echo.Context) error {
+		defer func() {
+			_ = context.Request().Body.Close()
+		}()
+
+		var request managers.QueryRequest
+		if err := json.NewDecoder(context.Request().Body).Decode(&request); err != nil {
+			return echo.NewHTTPError(http.StatusBadRequest, "invalid query request")
+		}
+
+		results, err := manager.Query(context.Request().Context(), request)
+		if err != nil {
+			return fmt.Errorf("could not query: %w", err)
+		}
+
+		if results == nil {
+			results = []managers.QueryEntry{}
+		}
+
+		return context.JSON(http.StatusOK, &QueryResponse{
+			Status: "success",
+			Data:   results,
 		})
 	})
 

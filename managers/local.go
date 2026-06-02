@@ -8,6 +8,7 @@ import (
 	"os"
 	"regexp"
 	"sort"
+	"sync"
 
 	"github.com/georgysavva/scany/v2/sqlscan"
 	lru "github.com/hashicorp/golang-lru/v2"
@@ -16,9 +17,10 @@ import (
 )
 
 type Local struct {
-	cache     *lru.Cache[string, *sql.DB]
-	outputDir string
-	watcher   *filewatcher.FileWatcher
+	cache      *lru.Cache[string, *sql.DB]
+	outputDir  string
+	watcher    *filewatcher.FileWatcher
+	lineSearch sync.Map // filename -> bool: whether the file has the line_search index
 }
 
 func NewLocal(
@@ -29,20 +31,26 @@ func NewLocal(
 		return nil, fmt.Errorf("could not start watcher: %w", err)
 	}
 
-	const numCachedDBs = 10
+	const numCachedDBs = 64
 
-	cache, err := lru.NewWithEvict[string, *sql.DB](numCachedDBs, func(_ string, client *sql.DB) {
+	local := &Local{
+		outputDir: outputPath,
+		watcher:   watcher,
+	}
+
+	cache, err := lru.NewWithEvict[string, *sql.DB](numCachedDBs, func(filename string, client *sql.DB) {
 		_ = client.Close()
+		// Drop the cached line_search answer so the map stays bounded by the
+		// handle cache.
+		local.lineSearch.Delete(filename)
 	})
 	if err != nil {
 		return nil, fmt.Errorf("could not start cache: %w", err)
 	}
 
-	return &Local{
-		cache:     cache,
-		outputDir: outputPath,
-		watcher:   watcher,
-	}, nil
+	local.cache = cache
+
+	return local, nil
 }
 
 func (m *Local) Close() error {
@@ -56,7 +64,7 @@ func (m *Local) Close() error {
 	return nil
 }
 
-func (m *Local) execute(fun func(*sql.DB) error) error {
+func (m *Local) execute(fun func(filename string, client *sql.DB) error) error {
 	err := m.watcher.Iterate(func(filename string) error {
 		// The file may have been compacted or cleaned up between the watcher
 		// learning about it and this query running; skip it rather than
@@ -74,10 +82,14 @@ func (m *Local) execute(fun func(*sql.DB) error) error {
 				return fmt.Errorf("could not open sqlite3 (%q): %w", filename, err)
 			}
 
+			// sqlitezstd is a read-only VFS and expects a single connection per
+			// database handle.
+			client.SetMaxOpenConns(1)
+
 			m.cache.Add(filename, client)
 		}
 
-		err := fun(client)
+		err := fun(filename, client)
 		if err != nil {
 			return fmt.Errorf("could not execute (%q): %w", filename, err)
 		}
@@ -94,7 +106,7 @@ func (m *Local) execute(fun func(*sql.DB) error) error {
 func (m *Local) Labels() ([]string, error) {
 	var foundLabels []string
 
-	err := m.execute(func(client *sql.DB) error {
+	err := m.execute(func(_ string, client *sql.DB) error {
 		var labels []string
 
 		err := sqlscan.Select(context.TODO(), client, &labels, `

@@ -116,4 +116,28 @@ var _ = Describe("Query", func() {
 		Expect(results).To(HaveLen(1))
 		Expect(results[0].Timestamp).To(Equal(base + 2000))
 	})
+
+	It("filters by line over a compacted segment (trigram index path)", func() {
+		// Compact the three flush files into one indexed segment, then query by
+		// line so the line_search MATCH path is exercised.
+		compactor := loge.NewCompactor(outputPath, 2, 128, 0)
+		merged, err := compactor.Compact()
+		Expect(err).NotTo(HaveOccurred())
+		Expect(merged).To(Equal(3))
+
+		// A fresh manager picks up the new segment and forgets the removed files.
+		segmentManager, err := managers.NewLocal(outputPath)
+		Expect(err).NotTo(HaveOccurred())
+		DeferCleanup(func() {
+			Expect(segmentManager.Close()).To(Succeed())
+		})
+
+		Eventually(func() ([]managers.QueryEntry, error) {
+			return segmentManager.Query(context.Background(), managers.QueryRequest{Line: "slow"})
+		}, "5s").Should(HaveLen(1))
+
+		results, err := segmentManager.Query(context.Background(), managers.QueryRequest{Line: "slow"})
+		Expect(err).NotTo(HaveOccurred())
+		Expect(results[0].Line).To(Equal("SELECT slow query"))
+	})
 })

@@ -66,11 +66,9 @@ func (m *Local) Query(ctx context.Context, req QueryRequest) ([]QueryEntry, erro
 		return nil, err
 	}
 
-	sqlText, args := buildQuery(req, limit)
-
 	var results []QueryEntry
 
-	err = m.execute(func(client *sql.DB) error {
+	err = m.execute(func(filename string, client *sql.DB) error {
 		// Skip files whose stored time bounds do not overlap the query window.
 		if req.Start != 0 || req.End != 0 {
 			overlaps, err := fileOverlaps(ctx, client, req.Start, req.End)
@@ -82,6 +80,13 @@ func (m *Local) Query(ctx context.Context, req QueryRequest) ([]QueryEntry, erro
 				return nil
 			}
 		}
+
+		// Use the trigram line index to accelerate the line filter on segments
+		// that have it; LIKE still runs as the exact filter so correctness does
+		// not depend on the index.
+		useLineIndex := req.Line != "" && len(req.Line) >= 3 && m.hasLineSearch(ctx, filename, client)
+
+		sqlText, args := buildQuery(req, limit, useLineIndex)
 
 		var rows []queryRow
 		if err := sqlscan.Select(ctx, client, &rows, sqlText, args...); err != nil {
@@ -123,6 +128,25 @@ func (m *Local) Query(ctx context.Context, req QueryRequest) ([]QueryEntry, erro
 	return results, nil
 }
 
+// hasLineSearch reports whether a file has the trigram line_search index,
+// caching the (immutable) answer per file.
+func (m *Local) hasLineSearch(ctx context.Context, filename string, client *sql.DB) bool {
+	if cached, ok := m.lineSearch.Load(filename); ok {
+		return cached.(bool)
+	}
+
+	var count int
+
+	err := client.QueryRowContext(ctx,
+		`SELECT COUNT(*) FROM sqlite_master WHERE type = 'table' AND name = 'line_search'`,
+	).Scan(&count)
+
+	has := err == nil && count > 0
+	m.lineSearch.Store(filename, has)
+
+	return has
+}
+
 // fileOverlaps reports whether a file's stored [minTimestamp, maxTimestamp]
 // bounds overlap the requested [start, end] window (0 meaning unbounded). If
 // the bounds cannot be read it conservatively reports an overlap so the file
@@ -155,14 +179,27 @@ func fileOverlaps(ctx context.Context, client *sql.DB, start, end int64) (bool, 
 }
 
 // buildQuery assembles the per-file SQL and its arguments. Each file returns at
-// most limit rows (newest first); the caller merges across files.
-func buildQuery(req QueryRequest, limit int) (string, []any) {
+// most limit rows (newest first); the caller merges across files. When
+// useLineIndex is set the trigram line_search index is joined in to accelerate
+// the line filter (the literal LIKE still runs as the exact filter).
+func buildQuery(req QueryRequest, limit int, useLineIndex bool) (string, []any) {
 	var sb strings.Builder
 
 	sb.WriteString(`SELECT s.timestamp AS timestamp, s.line AS line, json(l.payload) AS labels
-		FROM streams s JOIN labels l ON l.id = s.label_id WHERE 1 = 1`)
+		FROM streams s JOIN labels l ON l.id = s.label_id`)
 
-	args := make([]any, 0, len(req.Matchers)+3)
+	args := make([]any, 0, len(req.Matchers)+4)
+
+	if useLineIndex {
+		sb.WriteString(" JOIN line_search ON line_search.rowid = s.id")
+	}
+
+	sb.WriteString(" WHERE 1 = 1")
+
+	if useLineIndex {
+		sb.WriteString(" AND line_search MATCH ?")
+		args = append(args, `"`+strings.ReplaceAll(req.Line, `"`, `""`)+`"`)
+	}
 
 	if req.Start != 0 {
 		sb.WriteString(" AND s.timestamp >= ?")

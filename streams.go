@@ -1,6 +1,9 @@
 package loge
 
-import "strconv"
+import (
+	"fmt"
+	"strconv"
+)
 
 type Stream map[string]string
 
@@ -9,13 +12,16 @@ type (
 	Values []Value
 )
 
-func (v *Value) Timestamp() int64 {
+// Timestamp parses the nanosecond timestamp string. It returns an error
+// (rather than silently returning 0) so callers can reject or skip values
+// with malformed timestamps instead of corrupting time-range metadata.
+func (v *Value) Timestamp() (int64, error) {
 	value, err := strconv.ParseInt(v[0], 10, 64)
 	if err != nil {
-		return 0
+		return 0, fmt.Errorf("could not parse timestamp %q: %w", v[0], err)
 	}
 
-	return int64(value)
+	return value, nil
 }
 
 type Entry struct {

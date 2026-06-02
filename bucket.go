@@ -356,6 +356,7 @@ func flusher(payloads []Payload, outputDir string, prefix string) (string, error
 	streams := make([]streamEntry, 0, totalStreams)
 
 	// Collect all labels and streams for batch insert
+	skippedValues := 0
 	labelID := int64(0)
 	for _, payload := range payloads {
 		for _, stream := range payload.Streams {
@@ -365,7 +366,13 @@ func flusher(payloads []Payload, outputDir string, prefix string) (string, error
 			})
 
 			for _, value := range stream.Values {
-				timestamp := value.Timestamp()
+				timestamp, err := value.Timestamp()
+				if err != nil {
+					// Skip values with malformed timestamps rather than
+					// inserting timestamp=0 and corrupting min/max metadata.
+					skippedValues++
+					continue
+				}
 				streams = append(streams, streamEntry{
 					timestamp: timestamp,
 					line:      value[1],
@@ -375,6 +382,20 @@ func flusher(payloads []Payload, outputDir string, prefix string) (string, error
 				maxTimestamp = max(maxTimestamp, timestamp)
 			}
 		}
+	}
+
+	if skippedValues > 0 {
+		slog.Warn("skipped values with invalid timestamps",
+			slog.String("filename", filename),
+			slog.Int("skipped", skippedValues),
+		)
+	}
+
+	// Guard against persisting sentinel bounds when no valid stream rows were
+	// collected (e.g. every value had a malformed timestamp).
+	if len(streams) == 0 {
+		minTimestamp = 0
+		maxTimestamp = 0
 	}
 
 	// Batch insert labels

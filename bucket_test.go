@@ -86,6 +86,48 @@ var _ = Describe("Buckets", func() {
 		})
 	})
 
+	When("a value has a malformed timestamp", func() {
+		It("skips the value and does not corrupt the timestamp metadata", func() {
+			buckets, err := loge.NewBuckets(context.Background(), 1, 1, outputPath, false)
+			Expect(err).NotTo(HaveOccurred())
+
+			buckets.Append(loge.Payload{
+				Streams: loge.Streams{
+					loge.Entry{
+						Stream: loge.Stream{"tag": "value"},
+						Values: loge.Values{
+							loge.Value{"not-a-number", "bad"},
+						},
+					},
+				},
+			})
+
+			Eventually(func() int {
+				matches, _ := filepath.Glob(filepath.Join(outputPath, "*.sqlite.zst"))
+
+				return len(matches)
+			}).Should(BeNumerically("==", 1), "5s")
+
+			matches, err := filepath.Glob(filepath.Join(outputPath, "*.sqlite.zst"))
+			Expect(err).NotTo(HaveOccurred())
+
+			dbClient, err := sql.Open("sqlite3", matches[0]+"?vfs=zstd")
+			Expect(err).NotTo(HaveOccurred())
+			defer func() { _ = dbClient.Close() }()
+
+			var streamCount int
+			err = dbClient.QueryRow("SELECT COUNT(*) FROM streams").Scan(&streamCount)
+			Expect(err).NotTo(HaveOccurred())
+			Expect(streamCount).To(Equal(0), "value with bad timestamp should be skipped")
+
+			// Metadata must not retain the math.MaxInt64/MinInt64 sentinels.
+			var minTimestamp int64
+			err = dbClient.QueryRow("SELECT value FROM metadata WHERE key = 'minTimestamp'").Scan(&minTimestamp)
+			Expect(err).NotTo(HaveOccurred())
+			Expect(minTimestamp).To(Equal(int64(0)))
+		})
+	})
+
 	DescribeTable("When creating files", func(bucketSize, payloadSize, values, expectedFiles int) {
 		buckets, err := loge.NewBuckets(context.Background(), bucketSize, payloadSize, outputPath, false)
 		Expect(err).NotTo(HaveOccurred())

@@ -213,6 +213,18 @@ func (c *Compactor) merge(sources []string) error {
 		return fmt.Errorf("could not compress segment: %w", err)
 	}
 
+	// fsync the published segment (and the directory) before the caller deletes
+	// the source files, so the merged data is durable on its own first. This
+	// keeps the write-ahead-log checkpoint correct: a source file is only
+	// removed once the segment that replaces it is power-loss durable.
+	if err := fsyncFile(base + ".zst"); err != nil {
+		return fmt.Errorf("could not sync segment: %w", err)
+	}
+
+	if err := fsyncDir(c.dir); err != nil {
+		return fmt.Errorf("could not sync segment directory: %w", err)
+	}
+
 	return nil
 }
 

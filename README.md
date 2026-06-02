@@ -3,7 +3,8 @@
 > "Let's capture your logs!"
 
 `loge` captures logs into compressed SQLite files and lets you query them by time
-range, labels, and log-line content. It speaks a Grafana-Loki-style push API.
+range, labels, and log-line content. It speaks a Grafana-Loki-style push API and
+ships a `loge search` CLI for querying from the terminal.
 
 ## How it works
 
@@ -81,7 +82,51 @@ substring filter on the log line. Response:
 { "status": "success", "data": [ { "timestamp": 1700000000000000000, "line": "...", "labels": { "app": "web" } } ] }
 ```
 
-## Flags
+## Command-line search
+
+`loge search` queries a running server over the `POST /api/v1/query` API using a
+LogQL-style selector, so you can read logs from the terminal without crafting JSON.
+It builds the same request the API consumes, so its results match the server.
+
+```sh
+loge search '{app="web", level=~"err.*"} |= "timeout"' --addr http://localhost:3000 --since 1h
+```
+
+The positional selector has two parts:
+
+- **Stream-label matchers** in `{ ... }` — comma-separated `name op "value"` pairs,
+  where `op` is one of `=`, `!=`, `=~`, `!~` (the same operators as the query API;
+  `=~`/`!~` are regex). These filter the JSON stream labels. The block may be empty
+  (`{}`) or omitted when only a keyword filter is given.
+- An optional **keyword filter** `|= "term"` — a substring matched against the log
+  line via the trigram (FTS5) index. Only `|=` is supported (regex/negated line
+  filters are not), and `term` must be at least 3 characters so it can use the index.
+
+| Flag | Default | Description |
+|------|---------|-------------|
+| `--addr` | `http://localhost:3000` | base URL of the running loge server |
+| `--since` | – | relative window start, e.g. `1h`, `30m` (from now) |
+| `--until` | – | relative window end, e.g. `5m` ago (from now) |
+| `--start` | – | absolute window start: RFC3339 or unix nanoseconds (overrides `--since`) |
+| `--end` | – | absolute window end: RFC3339 or unix nanoseconds (overrides `--until`) |
+| `--limit` | `100` | max results (server caps at 5000) |
+| `--output` | `text` | output format: `text` or `json` |
+
+```sh
+# all "web" logs in the last hour, human-readable
+loge search '{app="web"}' --since 1h
+
+# errors containing a keyword, as JSON, over an absolute window
+loge search '{level=~"err.*"} |= "connection refused"' \
+  --start 2026-06-01T00:00:00Z --end 2026-06-02T00:00:00Z --output json
+
+# keyword-only search across all streams
+loge search '|= "panic"'
+```
+
+## Server flags
+
+The server is the default command, so `loge` and `loge serve` are equivalent.
 
 | Flag | Default | Description |
 |------|---------|-------------|
@@ -119,4 +164,6 @@ credentials come from the standard AWS chain (env / shared config / IAM role).
 task test    # ginkgo -tags fts5 -race
 task bench    # k6 push benchmarks (msgpack/json/protobuf)
 task server   # run a local server
+
+go build -tags fts5 -o loge ./loge/main.go   # build the `loge` binary (serve + search)
 ```

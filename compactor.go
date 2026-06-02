@@ -1,0 +1,329 @@
+package loge
+
+import (
+	"context"
+	"database/sql"
+	"fmt"
+	"log/slog"
+	"math"
+	"os"
+	"path/filepath"
+	"sort"
+	"time"
+)
+
+const (
+	// defaultCompactMinFiles is the number of small flush files that must
+	// accumulate before a compaction pass merges them.
+	defaultCompactMinFiles = 8
+	// defaultCompactMaxFiles bounds how many files a single segment merges, so
+	// one pass cannot produce an unbounded segment.
+	defaultCompactMaxFiles = 128
+	// defaultCompactInterval is how often the background loop looks for work.
+	defaultCompactInterval = 30 * time.Second
+)
+
+// Compactor merges the many small per-flush SQLite files into fewer, larger
+// time-local "segment" files, building the expensive trigram line index and
+// the timestamp/label indexes once per segment instead of once per flush.
+type Compactor struct {
+	dir      string
+	minFiles int
+	maxFiles int
+	interval time.Duration
+}
+
+// NewCompactor builds a Compactor for dir. Zero values select defaults.
+func NewCompactor(dir string, minFiles, maxFiles int, interval time.Duration) *Compactor {
+	if minFiles <= 1 {
+		minFiles = defaultCompactMinFiles
+	}
+
+	if maxFiles < minFiles {
+		maxFiles = defaultCompactMaxFiles
+	}
+
+	if interval <= 0 {
+		interval = defaultCompactInterval
+	}
+
+	return &Compactor{dir: dir, minFiles: minFiles, maxFiles: maxFiles, interval: interval}
+}
+
+// Run compacts on a ticker until ctx is cancelled.
+func (c *Compactor) Run(ctx context.Context) {
+	timer := time.NewTimer(c.interval)
+	defer timer.Stop()
+
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-timer.C:
+			if merged, err := c.Compact(); err != nil {
+				slog.Error("compaction failed", slog.String("error", err.Error()))
+			} else if merged > 0 {
+				slog.Info("compacted files into a segment", slog.Int("files", merged))
+			}
+
+			timer.Reset(c.interval)
+		}
+	}
+}
+
+// Compact merges one batch of the oldest flush files into a single segment.
+// It returns the number of source files merged (0 when there is nothing to do).
+func (c *Compactor) Compact() (int, error) {
+	candidates, err := filepath.Glob(filepath.Join(c.dir, "bucket-*.sqlite.zst"))
+	if err != nil {
+		return 0, fmt.Errorf("could not list flush files: %w", err)
+	}
+
+	if len(candidates) < c.minFiles {
+		return 0, nil
+	}
+
+	// Oldest first: the nanosecond suffix in the filename tracks creation order,
+	// so merging a contiguous batch keeps each segment time-local (which makes
+	// metadata time-pruning effective).
+	sort.Strings(candidates)
+
+	if len(candidates) > c.maxFiles {
+		candidates = candidates[:c.maxFiles]
+	}
+
+	if err := c.merge(candidates); err != nil {
+		return 0, err
+	}
+
+	// Publish-new-then-delete-old: the segment .sqlite.zst already exists, so
+	// removing the sources now never opens a query gap.
+	for _, source := range candidates {
+		if err := os.Remove(source); err != nil {
+			slog.Warn("could not remove compacted source",
+				slog.String("filename", source),
+				slog.String("error", err.Error()),
+			)
+		}
+	}
+
+	return len(candidates), nil
+}
+
+// merge reads every source file and writes a single compressed segment with the
+// trigram line index and supporting indexes built once.
+func (c *Compactor) merge(sources []string) error {
+	base := filepath.Join(c.dir, fmt.Sprintf("segment-%d.sqlite", time.Now().UnixNano()))
+	tmp := base + ".partial"
+
+	finalized := false
+	defer func() {
+		if !finalized {
+			_ = os.Remove(tmp)
+		}
+	}()
+
+	client, err := sql.Open("sqlite3", tmp)
+	if err != nil {
+		return fmt.Errorf("could not open segment: %w", err)
+	}
+	defer func() {
+		_ = client.Close()
+	}()
+
+	_, err = client.Exec(`
+		PRAGMA journal_mode = OFF;
+		PRAGMA synchronous = OFF;
+		PRAGMA locking_mode = EXCLUSIVE;
+		PRAGMA temp_store = FILE;
+
+		CREATE TABLE labels (id INTEGER PRIMARY KEY, payload BLOB) STRICT;
+		CREATE TABLE streams (id INTEGER PRIMARY KEY, timestamp INTEGER, line TEXT, label_id INTEGER) STRICT;
+		CREATE TABLE metadata (key TEXT PRIMARY KEY, value TEXT) STRICT, WITHOUT ROWID;
+	`)
+	if err != nil {
+		return fmt.Errorf("could not create segment schema: %w", err)
+	}
+
+	transaction, err := client.Begin()
+	if err != nil {
+		return fmt.Errorf("could not begin segment transaction: %w", err)
+	}
+	defer func() {
+		_ = transaction.Rollback()
+	}()
+
+	minTimestamp := int64(math.MaxInt64)
+	maxTimestamp := int64(math.MinInt64)
+	streamCount := 0
+	labelOffset := int64(0)
+
+	for _, source := range sources {
+		offset, fileMin, fileMax, count, err := copyFileInto(transaction, source, labelOffset)
+		if err != nil {
+			return fmt.Errorf("could not merge %q: %w", source, err)
+		}
+
+		labelOffset = offset
+		streamCount += count
+
+		if count > 0 {
+			minTimestamp = min(minTimestamp, fileMin)
+			maxTimestamp = max(maxTimestamp, fileMax)
+		}
+	}
+
+	if streamCount == 0 {
+		minTimestamp = 0
+		maxTimestamp = 0
+	}
+
+	if _, err := transaction.Exec(
+		`INSERT INTO metadata (key, value) VALUES ('minTimestamp', ?), ('maxTimestamp', ?);`,
+		minTimestamp, maxTimestamp,
+	); err != nil {
+		return fmt.Errorf("could not write segment metadata: %w", err)
+	}
+
+	// Build the heavy indexes once for the whole segment.
+	if _, err := transaction.Exec(`
+		CREATE INDEX idx_streams_timestamp ON streams(timestamp);
+		CREATE INDEX idx_streams_label_id ON streams(label_id);
+		CREATE VIRTUAL TABLE line_search USING fts5(line, content='', columnsize=0, tokenize="trigram");
+		INSERT INTO line_search(rowid, line) SELECT id, line FROM streams;
+	`); err != nil {
+		return fmt.Errorf("could not build segment indexes: %w", err)
+	}
+
+	if err := transaction.Commit(); err != nil {
+		return fmt.Errorf("could not commit segment: %w", err)
+	}
+
+	if err := client.Close(); err != nil {
+		return fmt.Errorf("could not close segment: %w", err)
+	}
+
+	if err := os.Rename(tmp, base); err != nil {
+		return fmt.Errorf("could not finalize segment: %w", err)
+	}
+	finalized = true
+
+	// compress() turns base into base+".zst" and removes base.
+	if err := compress(base); err != nil {
+		return fmt.Errorf("could not compress segment: %w", err)
+	}
+
+	return nil
+}
+
+// copyFileInto copies one source file's labels and streams into the segment
+// transaction, offsetting label ids so they do not collide across files. It
+// returns the next label offset, the file's min/max timestamps, and its stream
+// count.
+func copyFileInto(tx *sql.Tx, source string, labelOffset int64) (int64, int64, int64, int, error) {
+	src, err := sql.Open("sqlite3", source+"?vfs=zstd")
+	if err != nil {
+		return labelOffset, 0, 0, 0, fmt.Errorf("could not open source: %w", err)
+	}
+	src.SetMaxOpenConns(1)
+	defer func() {
+		_ = src.Close()
+	}()
+
+	maxOldID, err := copyLabels(tx, src, labelOffset)
+	if err != nil {
+		return labelOffset, 0, 0, 0, err
+	}
+
+	fileMin, fileMax, count, err := copyStreams(tx, src, labelOffset)
+	if err != nil {
+		return labelOffset, 0, 0, 0, err
+	}
+
+	return labelOffset + maxOldID, fileMin, fileMax, count, nil
+}
+
+func copyLabels(tx *sql.Tx, src *sql.DB, labelOffset int64) (int64, error) {
+	rows, err := src.Query("SELECT id, payload FROM labels")
+	if err != nil {
+		return 0, fmt.Errorf("could not read labels: %w", err)
+	}
+	defer func() {
+		_ = rows.Close()
+	}()
+
+	stmt, err := tx.Prepare("INSERT INTO labels (id, payload) VALUES (?, ?)")
+	if err != nil {
+		return 0, fmt.Errorf("could not prepare label insert: %w", err)
+	}
+	defer func() {
+		_ = stmt.Close()
+	}()
+
+	var maxOldID int64
+
+	for rows.Next() {
+		var (
+			id      int64
+			payload []byte
+		)
+
+		if err := rows.Scan(&id, &payload); err != nil {
+			return 0, fmt.Errorf("could not scan label: %w", err)
+		}
+
+		if _, err := stmt.Exec(id+labelOffset, payload); err != nil {
+			return 0, fmt.Errorf("could not insert label: %w", err)
+		}
+
+		if id > maxOldID {
+			maxOldID = id
+		}
+	}
+
+	return maxOldID, rows.Err()
+}
+
+func copyStreams(tx *sql.Tx, src *sql.DB, labelOffset int64) (int64, int64, int, error) {
+	rows, err := src.Query("SELECT timestamp, line, label_id FROM streams")
+	if err != nil {
+		return 0, 0, 0, fmt.Errorf("could not read streams: %w", err)
+	}
+	defer func() {
+		_ = rows.Close()
+	}()
+
+	stmt, err := tx.Prepare("INSERT INTO streams (timestamp, line, label_id) VALUES (?, ?, ?)")
+	if err != nil {
+		return 0, 0, 0, fmt.Errorf("could not prepare stream insert: %w", err)
+	}
+	defer func() {
+		_ = stmt.Close()
+	}()
+
+	fileMin := int64(math.MaxInt64)
+	fileMax := int64(math.MinInt64)
+	count := 0
+
+	for rows.Next() {
+		var (
+			timestamp int64
+			line      string
+			labelID   int64
+		)
+
+		if err := rows.Scan(&timestamp, &line, &labelID); err != nil {
+			return 0, 0, 0, fmt.Errorf("could not scan stream: %w", err)
+		}
+
+		if _, err := stmt.Exec(timestamp, line, labelID+labelOffset); err != nil {
+			return 0, 0, 0, fmt.Errorf("could not insert stream: %w", err)
+		}
+
+		fileMin = min(fileMin, timestamp)
+		fileMax = max(fileMax, timestamp)
+		count++
+	}
+
+	return fileMin, fileMax, count, rows.Err()
+}

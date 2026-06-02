@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"os"
 	"regexp"
+	"sort"
 
 	"github.com/georgysavva/scany/v2/sqlscan"
 	lru "github.com/hashicorp/golang-lru/v2"
@@ -114,5 +115,10 @@ func (m *Local) Labels() ([]string, error) {
 		return nil, fmt.Errorf("could not read all labels: %w", err)
 	}
 
-	return lo.Uniq(foundLabels), nil
+	// Files are iterated in a nondeterministic order (sync.Map.Range), so sort
+	// for a stable result across calls.
+	unique := lo.Uniq(foundLabels)
+	sort.Strings(unique)
+
+	return unique, nil
 }

@@ -55,6 +55,44 @@ var _ = Describe("FileWatcher", func() {
 			Expect(err).To(HaveOccurred())
 		})
 
+		It("stops tracking a file once it is removed", func() {
+			watcher, err := filewatcher.New(outputPath, regexp.MustCompile(`file-\d+\.txt$`))
+			Expect(err).NotTo(HaveOccurred())
+			defer func() {
+				if err := watcher.Close(); err != nil {
+					Fail(err.Error())
+				}
+			}()
+
+			name := filepath.Join(outputPath, fmt.Sprintf("file-%d.txt", time.Now().UnixNano()))
+			_, err = os.Create(name)
+			Expect(err).NotTo(HaveOccurred())
+
+			Eventually(func() int {
+				var count int
+				_ = watcher.Iterate(func(string) error {
+					count++
+
+					return nil
+				})
+
+				return count
+			}, "5s").Should(Equal(1))
+
+			Expect(os.Remove(name)).To(Succeed())
+
+			Eventually(func() int {
+				var count int
+				_ = watcher.Iterate(func(string) error {
+					count++
+
+					return nil
+				})
+
+				return count
+			}, "5s").Should(Equal(0))
+		})
+
 		It("does nothing if there are no files", func() {
 			watcher, err := filewatcher.New(outputPath, nil)
 			Expect(err).NotTo(HaveOccurred())

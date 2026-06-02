@@ -3,7 +3,9 @@ package managers
 import (
 	"context"
 	"database/sql"
+	"errors"
 	"fmt"
+	"os"
 	"regexp"
 
 	"github.com/georgysavva/scany/v2/sqlscan"
@@ -55,6 +57,13 @@ func (m *Local) Close() error {
 
 func (m *Local) execute(fun func(*sql.DB) error) error {
 	err := m.watcher.Iterate(func(filename string) error {
+		// The file may have been compacted or cleaned up between the watcher
+		// learning about it and this query running; skip it rather than
+		// failing the whole query.
+		if _, statErr := os.Stat(filename); errors.Is(statErr, os.ErrNotExist) {
+			return nil
+		}
+
 		client, ok := m.cache.Get(filename)
 		if !ok {
 			var err error

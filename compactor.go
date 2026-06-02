@@ -31,10 +31,22 @@ type Compactor struct {
 	minFiles int
 	maxFiles int
 	interval time.Duration
+	catalog  *Catalog
+}
+
+// CompactorOption configures optional Compactor behaviour.
+type CompactorOption func(*Compactor)
+
+// WithCompactorCatalog records each new segment in the catalog so the query
+// path can prune by time without opening files.
+func WithCompactorCatalog(catalog *Catalog) CompactorOption {
+	return func(c *Compactor) {
+		c.catalog = catalog
+	}
 }
 
 // NewCompactor builds a Compactor for dir. Zero values select defaults.
-func NewCompactor(dir string, minFiles, maxFiles int, interval time.Duration) *Compactor {
+func NewCompactor(dir string, minFiles, maxFiles int, interval time.Duration, opts ...CompactorOption) *Compactor {
 	if minFiles <= 1 {
 		minFiles = defaultCompactMinFiles
 	}
@@ -47,7 +59,13 @@ func NewCompactor(dir string, minFiles, maxFiles int, interval time.Duration) *C
 		interval = defaultCompactInterval
 	}
 
-	return &Compactor{dir: dir, minFiles: minFiles, maxFiles: maxFiles, interval: interval}
+	compactor := &Compactor{dir: dir, minFiles: minFiles, maxFiles: maxFiles, interval: interval}
+
+	for _, opt := range opts {
+		opt(compactor)
+	}
+
+	return compactor
 }
 
 // Run compacts on a ticker until ctx is cancelled.
@@ -113,7 +131,8 @@ func (c *Compactor) Compact() (int, error) {
 // merge reads every source file and writes a single compressed segment with the
 // trigram line index and supporting indexes built once.
 func (c *Compactor) merge(sources []string) error {
-	base := filepath.Join(c.dir, fmt.Sprintf("segment-%d.sqlite", time.Now().UnixNano()))
+	sealedAt := time.Now().UnixNano()
+	base := filepath.Join(c.dir, fmt.Sprintf("segment-%d.sqlite", sealedAt))
 	tmp := base + ".partial"
 
 	finalized := false
@@ -223,6 +242,21 @@ func (c *Compactor) merge(sources []string) error {
 
 	if err := fsyncDir(c.dir); err != nil {
 		return fmt.Errorf("could not sync segment directory: %w", err)
+	}
+
+	// Record the new segment in the catalog so queries can prune by time
+	// without opening it (and so it becomes a rotation candidate).
+	if c.catalog != nil {
+		meta, err := deriveSegmentMeta(base + ".zst")
+		if err != nil {
+			return fmt.Errorf("could not derive segment metadata: %w", err)
+		}
+
+		meta.SealedAt = sealedAt
+
+		if err := c.catalog.Upsert(meta); err != nil {
+			return fmt.Errorf("could not catalog segment: %w", err)
+		}
 	}
 
 	return nil

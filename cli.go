@@ -25,7 +25,7 @@ type CLI struct {
 }
 
 func (c *CLI) Run() error {
-	err := os.MkdirAll(c.OutputPath, os.ModePerm)
+	err := os.MkdirAll(c.OutputPath, 0o750)
 	if err != nil {
 		return fmt.Errorf("could not create directory: %w", err)
 	}

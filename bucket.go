@@ -276,7 +276,7 @@ func (b *Buckets) Close() error {
 func flusher(payloads []Payload, outputDir string, prefix string) (string, error) {
 	filename := filepath.Join(outputDir, fmt.Sprintf("%s-%d.sqlite", prefix, time.Now().UnixNano()))
 
-	err := os.MkdirAll(outputDir, os.ModePerm)
+	err := os.MkdirAll(outputDir, 0o750)
 	if err != nil {
 		return "", fmt.Errorf("could not create directory: %w", err)
 	}

@@ -7,6 +7,7 @@ import (
 	"net/http"
 	"os"
 	"os/signal"
+	"path/filepath"
 	"syscall"
 	"time"
 
@@ -32,6 +33,7 @@ type CLI struct {
 	FlushInterval      time.Duration `default:"1s"    help:"how often a bucket flushes a non-empty batch"`
 	CompactInterval    time.Duration `default:"30s"   help:"how often to compact small files into segments (0 disables)"`
 	CompactMinFiles    int           `default:"8"     help:"minimum number of flush files before a compaction pass runs"`
+	Durable            bool          `default:"true"  help:"write-ahead log each payload (fsync) before acknowledging; disable for faster, lossy-on-crash ingest"`
 }
 
 func (c *CLI) Run() error {
@@ -65,6 +67,30 @@ func (c *CLI) Run() error {
 		go compactor.Run(ctx)
 	}
 
+	// Optional write-ahead log: durably record (and fsync) each payload before
+	// acknowledging it, and replay any segments left by a previous crash.
+	var wal *WAL
+
+	walDir := filepath.Join(c.OutputPath, "wal")
+
+	if c.Durable {
+		recovered, err := ReplayWAL(walDir, func(payload *Payload) {
+			buckets.Append(*payload)
+		})
+		if err != nil {
+			return fmt.Errorf("could not replay write-ahead log: %w", err)
+		}
+
+		if recovered > 0 {
+			slog.Info("replayed write-ahead log", slog.Int("payloads", recovered))
+		}
+
+		wal, err = OpenWAL(walDir)
+		if err != nil {
+			return fmt.Errorf("could not open write-ahead log: %w", err)
+		}
+	}
+
 	router := echo.New()
 	router.Use(middleware.Recover())
 	router.HideBanner = true
@@ -87,11 +113,22 @@ func (c *CLI) Run() error {
 			return echo.NewHTTPError(http.StatusBadRequest, msg)
 		}
 
+		if wal != nil {
+			// Durably record the payload before acknowledging so a crash cannot
+			// lose acknowledged data (at-least-once).
+			if err := wal.Append(payload); err != nil {
+				return fmt.Errorf("could not write to write-ahead log: %w", err)
+			}
+
+			buckets.Append(*payload)
+
+			return context.NoContent(http.StatusOK)
+		}
+
 		buckets.Append(*payload)
 
 		// 202 Accepted: the payload is queued for asynchronous flushing and is
-		// not yet durably on disk. This becomes 200 once a write-ahead log
-		// makes ingestion durable before acknowledgement.
+		// not yet durably on disk (write-ahead log disabled).
 		return context.NoContent(http.StatusAccepted)
 	})
 
@@ -164,6 +201,20 @@ func (c *CLI) Run() error {
 	if err := buckets.Close(); err != nil {
 		return fmt.Errorf("could not close buckets: %w", err)
 	}
+
+	// Buckets.Close flushed everything durably, so the write-ahead log is no
+	// longer needed: stop it and remove its segments. (On a crash the segments
+	// survive and are replayed on the next start.)
+	if wal != nil {
+		if err := wal.Close(); err != nil {
+			return fmt.Errorf("could not close write-ahead log: %w", err)
+		}
+
+		if err := RemoveWAL(walDir); err != nil {
+			return fmt.Errorf("could not clear write-ahead log: %w", err)
+		}
+	}
+
 	slog.Info("shutdown complete")
 
 	return nil

@@ -8,7 +8,7 @@ import (
 
 	"github.com/goccy/go-json"
 	pb "github.com/jtarchie/loge/proto"
-	"github.com/labstack/echo/v4"
+	"github.com/labstack/echo/v5"
 	"github.com/tinylib/msgp/msgp"
 	"google.golang.org/protobuf/proto"
 )
@@ -18,7 +18,7 @@ const (
 	protobufContentType = "application/protobuf"
 )
 
-func bind(context echo.Context, payload interface{}) error {
+func bind(context *echo.Context, payload interface{}) error {
 	contentType := context.Request().Header.Get(echo.HeaderContentType)
 
 	switch {
@@ -76,7 +76,7 @@ func bind(context echo.Context, payload interface{}) error {
 	return nil
 }
 
-func response(context echo.Context, status int, payload interface{}) error {
+func response(context *echo.Context, status int, payload interface{}) error {
 	accept := context.Request().Header.Get(echo.HeaderAccept)
 
 	if strings.Contains(accept, msgpackContentType) {

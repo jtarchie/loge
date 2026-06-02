@@ -5,6 +5,10 @@ go 1.25.0
 require (
 	github.com/SaveTheRbtz/zstd-seekable-format-go/pkg v0.9.0
 	github.com/alecthomas/kong v1.15.0
+	github.com/aws/aws-sdk-go-v2 v1.41.9
+	github.com/aws/aws-sdk-go-v2/config v1.32.20
+	github.com/aws/aws-sdk-go-v2/feature/s3/manager v1.22.22
+	github.com/aws/aws-sdk-go-v2/service/s3 v1.102.2
 	github.com/fsnotify/fsnotify v1.10.1
 	github.com/georgysavva/scany/v2 v2.1.4
 	github.com/goccy/go-json v0.10.6
@@ -14,7 +18,7 @@ require (
 	github.com/jtarchie/sqlitezstd v0.0.0-20260602170745-ba08a4d7b1f4
 	github.com/jtarchie/worker v0.0.0-20251226174303-31967c3fe3c0
 	github.com/klauspost/compress v1.18.6
-	github.com/labstack/echo/v4 v4.15.2
+	github.com/labstack/echo/v5 v5.1.1
 	github.com/mattn/go-sqlite3 v1.14.44
 	github.com/onsi/ginkgo/v2 v2.29.0
 	github.com/onsi/gomega v1.41.0
@@ -27,12 +31,9 @@ require (
 require (
 	github.com/Masterminds/semver/v3 v3.5.0 // indirect
 	github.com/andybalholm/brotli v1.2.1 // indirect
-	github.com/aws/aws-sdk-go-v2 v1.41.9 // indirect
 	github.com/aws/aws-sdk-go-v2/aws/protocol/eventstream v1.7.11 // indirect
-	github.com/aws/aws-sdk-go-v2/config v1.32.20 // indirect
 	github.com/aws/aws-sdk-go-v2/credentials v1.19.19 // indirect
 	github.com/aws/aws-sdk-go-v2/feature/ec2/imds v1.18.25 // indirect
-	github.com/aws/aws-sdk-go-v2/feature/s3/manager v1.22.22 // indirect
 	github.com/aws/aws-sdk-go-v2/internal/configsources v1.4.25 // indirect
 	github.com/aws/aws-sdk-go-v2/internal/endpoints/v2 v2.7.25 // indirect
 	github.com/aws/aws-sdk-go-v2/internal/v4a v1.4.26 // indirect
@@ -40,7 +41,6 @@ require (
 	github.com/aws/aws-sdk-go-v2/service/internal/checksum v1.9.18 // indirect
 	github.com/aws/aws-sdk-go-v2/service/internal/presigned-url v1.13.25 // indirect
 	github.com/aws/aws-sdk-go-v2/service/internal/s3shared v1.19.25 // indirect
-	github.com/aws/aws-sdk-go-v2/service/s3 v1.102.2 // indirect
 	github.com/aws/aws-sdk-go-v2/service/signin v1.1.1 // indirect
 	github.com/aws/aws-sdk-go-v2/service/sso v1.30.19 // indirect
 	github.com/aws/aws-sdk-go-v2/service/ssooidc v1.36.2 // indirect
@@ -54,17 +54,12 @@ require (
 	github.com/google/go-querystring v1.2.0 // indirect
 	github.com/google/pprof v0.0.0-20260507013755-92041b743c96 // indirect
 	github.com/icholy/digest v1.1.0 // indirect
-	github.com/labstack/gommon v0.5.0 // indirect
-	github.com/mattn/go-colorable v0.1.15 // indirect
-	github.com/mattn/go-isatty v0.0.22 // indirect
 	github.com/philhofer/fwd v1.2.0 // indirect
 	github.com/psanford/httpreadat v0.1.0 // indirect
 	github.com/psanford/sqlite3vfs v0.0.0-20260519004904-f9180fa2acc9 // indirect
 	github.com/quic-go/qpack v0.6.0 // indirect
 	github.com/quic-go/quic-go v0.57.1 // indirect
 	github.com/refraction-networking/utls v1.8.2 // indirect
-	github.com/valyala/bytebufferpool v1.0.0 // indirect
-	github.com/valyala/fasttemplate v1.2.2 // indirect
 	go.yaml.in/yaml/v3 v3.0.4 // indirect
 	golang.org/x/crypto v0.52.0 // indirect
 	golang.org/x/mod v0.36.0 // indirect

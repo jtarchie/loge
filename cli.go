@@ -16,8 +16,8 @@ import (
 	"github.com/goccy/go-json"
 	"github.com/jtarchie/loge/managers"
 	"github.com/jtarchie/sqlitezstd"
-	"github.com/labstack/echo/v4"
-	"github.com/labstack/echo/v4/middleware"
+	"github.com/labstack/echo/v5"
+	"github.com/labstack/echo/v5/middleware"
 )
 
 // cacheVFSName is a sqlite VFS registered once with an HTTP read cache, used to
@@ -207,11 +207,13 @@ func (c *CLI) Run() error {
 	}
 
 	router := echo.New()
+	// Echo v5 logs through log/slog; route its logs to the app's default handler
+	// (stderr) instead of v5's own stdout JSON handler.
+	router.Logger = slog.Default()
 	router.Use(middleware.Recover())
-	router.HideBanner = true
 	router.JSONSerializer = DefaultJSONSerializer{}
 
-	router.POST("/api/v1/push", func(context echo.Context) error {
+	router.POST("/api/v1/push", func(context *echo.Context) error {
 		payload := &Payload{}
 
 		err := bind(context, payload)
@@ -243,7 +245,7 @@ func (c *CLI) Run() error {
 		return context.NoContent(http.StatusAccepted)
 	})
 
-	router.GET("/api/v1/labels", func(context echo.Context) error {
+	router.GET("/api/v1/labels", func(context *echo.Context) error {
 		labels, err := manager.Labels()
 		if err != nil {
 			return fmt.Errorf("could not load labels: %w", err)
@@ -255,7 +257,7 @@ func (c *CLI) Run() error {
 		})
 	})
 
-	router.POST("/api/v1/query", func(context echo.Context) error {
+	router.POST("/api/v1/query", func(context *echo.Context) error {
 		defer func() {
 			_ = context.Request().Body.Close()
 		}()
@@ -280,32 +282,26 @@ func (c *CLI) Run() error {
 		})
 	})
 
-	// Graceful shutdown handling
-	quit := make(chan os.Signal, 1)
-	signal.Notify(quit, syscall.SIGINT, syscall.SIGTERM)
+	// Graceful shutdown handling: a SIGINT/SIGTERM cancels serverCtx, which drives
+	// StartConfig.Start to gracefully drain in-flight requests (up to GracefulTimeout)
+	// before returning. Start swallows http.ErrServerClosed and returns nil on a
+	// clean shutdown, so any non-nil error here is a genuine startup failure.
+	serverCtx, stopSignals := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
+	defer stopSignals()
 
-	go func() {
-		<-quit
-		slog.Info("shutting down server...")
-
-		// Cancel the bucket context to signal shutdown
-		cancel()
-
-		// Create a deadline for graceful HTTP shutdown
-		shutdownCtx, shutdownCancel := context.WithTimeout(context.Background(), 30*time.Second)
-		defer shutdownCancel()
-
-		// Stop accepting new requests
-		if err := router.Shutdown(shutdownCtx); err != nil {
-			slog.Error("server shutdown error", slog.String("error", err.Error()))
-		}
-	}()
-
-	// Start server
-	serverErr := router.Start(fmt.Sprintf(":%d", c.Port))
-	if serverErr != nil && serverErr != http.ErrServerClosed {
+	serverErr := echo.StartConfig{
+		Address:         fmt.Sprintf(":%d", c.Port),
+		HideBanner:      true,
+		GracefulTimeout: 30 * time.Second,
+	}.Start(serverCtx, router)
+	if serverErr != nil {
 		return serverErr
 	}
+
+	// The server has drained, so stop background work (compaction, S3 rotation,
+	// bucket flush timers) before the final flush below.
+	slog.Info("shutting down server...")
+	cancel()
 
 	// After server stops, gracefully close buckets to flush all remaining data.
 	// This drains the flush/compress pipeline (which feeds the checkpointer),

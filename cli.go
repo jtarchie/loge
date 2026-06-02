@@ -24,11 +24,14 @@ type QueryResponse struct {
 }
 
 type CLI struct {
-	Port               int    `default:"3000"  help:"start HTTP server on port"            required:""`
-	Buckets            int    `default:"4"     help:"number of buckets to fill into"       required:""`
-	PayloadSize        int    `default:"1000"  help:"size of the bucket payload"           required:""`
-	OutputPath         string `default:"tmp/"  help:"output path for all the sqlite files" required:""`
-	DropOnBackpressure bool   `default:"false" help:"drop data instead of blocking when backpressure occurs"`
+	Port               int           `default:"3000"  help:"start HTTP server on port"            required:""`
+	Buckets            int           `default:"4"     help:"number of buckets to fill into"       required:""`
+	PayloadSize        int           `default:"1000"  help:"size of the bucket payload"           required:""`
+	OutputPath         string        `default:"tmp/"  help:"output path for all the sqlite files" required:""`
+	DropOnBackpressure bool          `default:"false" help:"drop data instead of blocking when backpressure occurs"`
+	FlushInterval      time.Duration `default:"1s"    help:"how often a bucket flushes a non-empty batch"`
+	CompactInterval    time.Duration `default:"30s"   help:"how often to compact small files into segments (0 disables)"`
+	CompactMinFiles    int           `default:"8"     help:"minimum number of flush files before a compaction pass runs"`
 }
 
 func (c *CLI) Run() error {
@@ -49,9 +52,17 @@ func (c *CLI) Run() error {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 
-	buckets, err := NewBuckets(ctx, c.Buckets, c.PayloadSize, c.OutputPath, c.DropOnBackpressure)
+	buckets, err := NewBuckets(ctx, c.Buckets, c.PayloadSize, c.OutputPath, c.DropOnBackpressure,
+		WithFlushInterval(c.FlushInterval))
 	if err != nil {
 		return fmt.Errorf("could not create buckets: %w", err)
+	}
+
+	// Background compaction merges the many small flush files into fewer,
+	// larger indexed segments. Disabled when the interval is non-positive.
+	if c.CompactInterval > 0 {
+		compactor := NewCompactor(c.OutputPath, c.CompactMinFiles, 0, c.CompactInterval)
+		go compactor.Run(ctx)
 	}
 
 	router := echo.New()

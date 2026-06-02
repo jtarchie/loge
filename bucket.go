@@ -27,14 +27,28 @@ type Buckets struct {
 	flushers           *worker.Worker[[]Payload]
 	compressors        *worker.Worker[string]
 	dropOnBackpressure bool
+	flushInterval      time.Duration
 }
 
 const (
-	flushInterval  = 1 * time.Second // Flush frequently to reduce memory
-	maxBatchInsert = 500              // max rows per batch INSERT
-	enqueueTimeout = 100 * time.Millisecond
-	enqueueRetries = 3
+	defaultFlushInterval = 1 * time.Second // Flush frequently to reduce memory
+	maxBatchInsert       = 500             // max rows per batch INSERT
+	enqueueTimeout       = 100 * time.Millisecond
+	enqueueRetries       = 3
 )
+
+// BucketOption configures optional Buckets behaviour.
+type BucketOption func(*Buckets)
+
+// WithFlushInterval overrides how often a bucket worker flushes a non-empty
+// batch. A non-positive duration is ignored.
+func WithFlushInterval(interval time.Duration) BucketOption {
+	return func(b *Buckets) {
+		if interval > 0 {
+			b.flushInterval = interval
+		}
+	}
+}
 
 // Types for batch inserts
 type labelEntry struct {
@@ -77,6 +91,7 @@ func NewBuckets(
 	payloadSize int,
 	outputPath string,
 	dropOnBackpressure bool,
+	opts ...BucketOption,
 ) (*Buckets, error) {
 	// Create a cancellable context for shutdown
 	ctx, cancel := context.WithCancel(ctx)
@@ -107,6 +122,11 @@ func NewBuckets(
 		flushers:           flushers,
 		compressors:        compressors,
 		dropOnBackpressure: dropOnBackpressure,
+		flushInterval:      defaultFlushInterval,
+	}
+
+	for _, opt := range opts {
+		opt(buckets)
 	}
 
 	for index := range size {
@@ -121,7 +141,7 @@ func (b *Buckets) bucketWorker(index int, payloadSize int, flushers *worker.Work
 	defer b.wg.Done()
 
 	payloads := make([]Payload, 0, payloadSize)
-	timer := time.NewTimer(flushInterval)
+	timer := time.NewTimer(b.flushInterval)
 	defer timer.Stop()
 
 	flush := func(blocking bool) {
@@ -212,7 +232,7 @@ func (b *Buckets) bucketWorker(index int, payloadSize int, flushers *worker.Work
 
 		case <-timer.C:
 			flush(true)
-			timer.Reset(flushInterval)
+			timer.Reset(b.flushInterval)
 
 		case payload, ok := <-b.receiver:
 			if !ok {
@@ -222,7 +242,7 @@ func (b *Buckets) bucketWorker(index int, payloadSize int, flushers *worker.Work
 			}
 
 			payloads = append(payloads, payload)
-			timer.Reset(flushInterval)
+			timer.Reset(b.flushInterval)
 
 			if len(payloads) >= payloadSize {
 				flush(true)

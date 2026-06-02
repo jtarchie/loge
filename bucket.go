@@ -275,15 +275,26 @@ func (b *Buckets) Close() error {
 
 func flusher(payloads []Payload, outputDir string, prefix string) (string, error) {
 	filename := filepath.Join(outputDir, fmt.Sprintf("%s-%d.sqlite", prefix, time.Now().UnixNano()))
+	// Write to a temporary file and atomically rename on success so the
+	// compressor (and any reader) never observes a half-written database,
+	// which matters because the DB is written with journal_mode=OFF.
+	tmpFilename := filename + ".partial"
 
 	err := os.MkdirAll(outputDir, 0o750)
 	if err != nil {
 		return "", fmt.Errorf("could not create directory: %w", err)
 	}
 
-	client, err := sql.Open("sqlite3", filename)
+	renamed := false
+	defer func() {
+		if !renamed {
+			_ = os.Remove(tmpFilename)
+		}
+	}()
+
+	client, err := sql.Open("sqlite3", tmpFilename)
 	if err != nil {
-		return "", fmt.Errorf("could not open sqlite3 %q: %w", filename, err)
+		return "", fmt.Errorf("could not open sqlite3 %q: %w", tmpFilename, err)
 	}
 	defer func() {
 		_ = client.Close()
@@ -460,6 +471,11 @@ func flusher(payloads []Payload, outputDir string, prefix string) (string, error
 	if err != nil {
 		return "", fmt.Errorf("could not close sqlite: %w", err)
 	}
+
+	if err := os.Rename(tmpFilename, filename); err != nil {
+		return "", fmt.Errorf("could not finalize %q: %w", filename, err)
+	}
+	renamed = true
 
 	return filename, nil
 }

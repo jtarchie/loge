@@ -302,10 +302,15 @@ func (b *Buckets) bucketWorker(index int, payloadSize int, flushers *worker.Work
 			}
 
 			add(item)
-			timer.Reset(b.flushInterval)
 
+			// Flush as soon as the batch is full; otherwise let the timer fire
+			// so a non-empty batch is never held longer than flushInterval.
+			// (The timer is deliberately NOT reset per payload: under sustained
+			// load that would keep pushing the deadline out so periodic flushes
+			// never happen, unbounding memory and the write-ahead log.)
 			if len(payloads) >= payloadSize {
 				flush(true)
+				timer.Reset(b.flushInterval)
 			}
 		}
 	}

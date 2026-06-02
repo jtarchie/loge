@@ -585,11 +585,6 @@ func compress(filename string) error {
 		return fmt.Errorf("could not close writer: %w", err)
 	}
 
-	// Ensure the compressed bytes are durably on disk before we publish the
-	// file and delete the source.
-	if err := output.Sync(); err != nil {
-		return fmt.Errorf("could not sync compressed file: %w", err)
-	}
 	if err := output.Close(); err != nil {
 		return fmt.Errorf("could not close compressed file: %w", err)
 	}
@@ -599,32 +594,9 @@ func compress(filename string) error {
 	}
 	finalized = true
 
-	// Make the rename durable so the published file survives a crash.
-	if err := syncDir(final); err != nil {
-		return fmt.Errorf("could not sync directory: %w", err)
-	}
-
 	err = os.Remove(filename)
 	if err != nil {
 		return fmt.Errorf("could not remove original file: %w", err)
-	}
-
-	return nil
-}
-
-// syncDir fsyncs the directory containing path so a rename/create within it
-// is durable across a crash.
-func syncDir(path string) error {
-	dir, err := os.Open(filepath.Dir(path))
-	if err != nil {
-		return fmt.Errorf("could not open directory: %w", err)
-	}
-	defer func() {
-		_ = dir.Close()
-	}()
-
-	if err := dir.Sync(); err != nil {
-		return fmt.Errorf("could not sync directory: %w", err)
 	}
 
 	return nil

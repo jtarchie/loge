@@ -71,31 +71,6 @@ var copyBufferPool = sync.Pool{
 	},
 }
 
-// payloadPool reduces GC pressure by reusing Payload objects
-var payloadPool = sync.Pool{
-	New: func() any {
-		return &Payload{
-			Streams: make(Streams, 0, 8),
-		}
-	},
-}
-
-// GetPayload gets a Payload from the pool
-func GetPayload() *Payload {
-	return payloadPool.Get().(*Payload)
-}
-
-// PutPayload returns a Payload to the pool after resetting it
-func PutPayload(p *Payload) {
-	// Reset slices but keep capacity
-	for i := range p.Streams {
-		p.Streams[i].Stream = nil
-		p.Streams[i].Values = nil
-	}
-	p.Streams = p.Streams[:0]
-	payloadPool.Put(p)
-}
-
 func NewBuckets(
 	ctx context.Context,
 	size int,

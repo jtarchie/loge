@@ -53,11 +53,10 @@ func (c *CLI) Run() error {
 	router.JSONSerializer = DefaultJSONSerializer{}
 
 	router.POST("/api/v1/push", func(context echo.Context) error {
-		payload := GetPayload()
+		payload := &Payload{}
 
 		err := bind(context, payload)
 		if err != nil {
-			PutPayload(payload)
 			return fmt.Errorf("could not bind payload: %w", err)
 		}
 		defer func() {
@@ -67,12 +66,9 @@ func (c *CLI) Run() error {
 		// Reject malformed payloads (empty streams, missing labels/values)
 		// instead of silently persisting empty or inconsistent files.
 		if msg, ok := payload.Valid(); !ok {
-			PutPayload(payload)
 			return echo.NewHTTPError(http.StatusBadRequest, msg)
 		}
 
-		// Note: payload ownership transfers to buckets, don't return to pool here
-		// The bucket worker will handle the payload lifecycle
 		buckets.Append(*payload)
 
 		// 202 Accepted: the payload is queued for asynchronous flushing and is

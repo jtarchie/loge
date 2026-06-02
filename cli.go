@@ -47,7 +47,18 @@ type QueryResponse struct {
 	Data   []managers.QueryEntry `json:"data"`
 }
 
+// CLI is the top-level command. The server is the default command (so bare
+// flags like `loge --port 6500` still start it), and `loge search` queries a
+// running server. CLI itself has no Run() method on purpose: kong invokes the
+// Run() of every selected node's ancestors, so a CLI.Run() would also fire for
+// the search subcommand.
 type CLI struct {
+	Serve  ServeCmd  `cmd:"" default:"withargs" help:"run the loge ingest+query HTTP server (default)"`
+	Search SearchCmd `cmd:""                    help:"query a running loge server with a LogQL-style selector"`
+}
+
+// ServeCmd runs the ingest+query HTTP server. Its fields are every server flag.
+type ServeCmd struct {
 	Port               int           `default:"3000"  help:"start HTTP server on port"            required:""`
 	Buckets            int           `default:"4"     help:"number of buckets to fill into"       required:""`
 	PayloadSize        int           `default:"1000"  help:"size of the bucket payload"           required:""`
@@ -76,7 +87,7 @@ type CLI struct {
 	S3HTTPPageBytes  int           `name:"s3-http-page-bytes"   default:"0"     help:"coalescing page size for the HTTP read cache (0 uses the default)"`
 }
 
-func (c *CLI) Run() error {
+func (c *ServeCmd) Run() error {
 	err := os.MkdirAll(c.OutputPath, 0o750)
 	if err != nil {
 		return fmt.Errorf("could not create directory: %w", err)

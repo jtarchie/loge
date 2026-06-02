@@ -20,7 +20,10 @@ POST /api/v1/push ──► bucket workers batch ──► flush to <bucket>.sql
 - **Ingest** is batched in memory and flushed to small, immutable, zstd-compressed
   SQLite files. With the write-ahead log enabled (default) each payload is fsynced
   before `/push` is acknowledged, so an acknowledged log is not lost on a crash
-  (at-least-once; replayed on restart).
+  (at-least-once; replayed on restart). A checkpoint keeps the log bounded: once a
+  payload is durably in a queryable segment, its log record is pruned, so the WAL
+  only ever holds the un-flushed tail (seconds of data) rather than the whole
+  session.
 - **Compaction** runs in the background, merging the many small flush files into
   fewer, larger, time-local segments and building the expensive indexes once per
   segment instead of once per flush.
@@ -82,7 +85,8 @@ substring filter on the log line. Response:
 | `--compact-interval` | `30s` | how often to merge small files into segments (`0` disables) |
 | `--compact-min-files` | `8` | minimum flush files before a compaction pass runs |
 | `--durable` | `true` | fsync each payload to the write-ahead log before acknowledging |
-| `--drop-on-backpressure` | `false` | drop instead of blocking when the flush pipeline is saturated |
+| `--checkpoint-interval` | `2s` | how often to fsync new segments and prune the write-ahead log |
+| `--drop-on-backpressure` | `false` | drop instead of blocking when the flush pipeline is saturated (ignored when `--durable`) |
 
 ## Development
 

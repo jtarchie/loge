@@ -316,11 +316,6 @@ func flusher(payloads []Payload, outputDir string, prefix string) (string, error
 			key TEXT PRIMARY KEY,
 			value TEXT
 		) STRICT, WITHOUT ROWID;
-
-		CREATE VIRTUAL TABLE stream_tree USING rtree(
-			id,
-			minTimestamp, maxTimestamp
-		);
 	`)
 	if err != nil {
 		return "", fmt.Errorf("could not create schema %q: %w", filename, err)
@@ -411,34 +406,10 @@ func flusher(payloads []Payload, outputDir string, prefix string) (string, error
 		return "", fmt.Errorf("could not insert metadata %q: %w", filename, err)
 	}
 
-	_, err = transaction.Exec(`
-		CREATE VIRTUAL TABLE
-			search
-		USING
-			fts5(payload, content = '', columnsize=0, tokenize="trigram");
-
-		WITH payload AS (
-			SELECT
-				labels.id AS id,
-				json_each.key || ' ' || json_each.value AS kv
-			FROM
-				labels,
-				json_each(labels.payload)
-		)
-		INSERT INTO
-			search(rowid, payload)
-		SELECT
-			id,
-			GROUP_CONCAT(kv, ' ')
-		FROM
-			payload
-		GROUP BY id;
-
-		INSERT INTO stream_tree (id, minTimestamp, maxTimestamp) SELECT id, timestamp, timestamp FROM streams;
-	`)
-	if err != nil {
-		return "", fmt.Errorf("could not create search index %q: %w", filename, err)
-	}
+	// The expensive FTS5 (line) index and a timestamp index are built once per
+	// compacted segment (see managers/compactor.go), not per flush: building
+	// them on every tiny file dominated write cost and they were never read on
+	// the ingest hot path. Fresh, uncompacted files are queried with a scan.
 
 	err = transaction.Commit()
 	if err != nil {

@@ -71,10 +71,6 @@ var _ = Describe("Buckets", func() {
 			Expect(err).NotTo(HaveOccurred())
 			Expect(count).To(BeNumerically(">=", 1))
 
-			err = dbClient.QueryRow("SELECT COUNT(*) FROM search WHERE search MATCH 'tag'").Scan(&count)
-			Expect(err).NotTo(HaveOccurred())
-			Expect(count).To(BeNumerically(">=", 1))
-
 			var value string
 			err = dbClient.QueryRow("SELECT value FROM metadata WHERE key = 'minTimestamp'").Scan(&value)
 			Expect(err).NotTo(HaveOccurred())

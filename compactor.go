@@ -10,6 +10,8 @@ import (
 	"path/filepath"
 	"sort"
 	"time"
+
+	"github.com/jtarchie/loge/managers"
 )
 
 const (
@@ -31,7 +33,7 @@ type Compactor struct {
 	minFiles int
 	maxFiles int
 	interval time.Duration
-	catalog  *Catalog
+	catalog  *managers.Catalog
 }
 
 // CompactorOption configures optional Compactor behaviour.
@@ -39,7 +41,7 @@ type CompactorOption func(*Compactor)
 
 // WithCompactorCatalog records each new segment in the catalog so the query
 // path can prune by time without opening files.
-func WithCompactorCatalog(catalog *Catalog) CompactorOption {
+func WithCompactorCatalog(catalog *managers.Catalog) CompactorOption {
 	return func(c *Compactor) {
 		c.catalog = catalog
 	}
@@ -247,7 +249,7 @@ func (c *Compactor) merge(sources []string) error {
 	// Record the new segment in the catalog so queries can prune by time
 	// without opening it (and so it becomes a rotation candidate).
 	if c.catalog != nil {
-		meta, err := deriveSegmentMeta(base + ".zst")
+		meta, err := managers.DeriveSegmentMeta(base + ".zst")
 		if err != nil {
 			return fmt.Errorf("could not derive segment metadata: %w", err)
 		}

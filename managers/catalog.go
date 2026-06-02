@@ -1,4 +1,4 @@
-package loge
+package managers
 
 import (
 	"context"
@@ -304,7 +304,7 @@ func (c *Catalog) Reconcile(dir string) error {
 			continue
 		}
 
-		meta, err := deriveSegmentMeta(path)
+		meta, err := DeriveSegmentMeta(path)
 		if err != nil {
 			return fmt.Errorf("could not derive metadata for %q: %w", path, err)
 		}
@@ -342,9 +342,9 @@ func (c *Catalog) setLocalPath(id, localPath string) error {
 	return nil
 }
 
-// deriveSegmentMeta opens a local segment and reads its metadata so a catalog
+// DeriveSegmentMeta opens a local segment and reads its metadata so a catalog
 // row can be (re)built. The returned row is local.
-func deriveSegmentMeta(path string) (SegmentMeta, error) {
+func DeriveSegmentMeta(path string) (SegmentMeta, error) {
 	abs, err := filepath.Abs(path)
 	if err != nil {
 		return SegmentMeta{}, fmt.Errorf("could not resolve path: %w", err)

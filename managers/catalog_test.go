@@ -1,4 +1,4 @@
-package loge_test
+package managers_test
 
 import (
 	"context"
@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"github.com/jtarchie/loge"
+	"github.com/jtarchie/loge/managers"
 	_ "github.com/jtarchie/sqlitezstd"
 	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
@@ -21,16 +22,16 @@ var _ = Describe("Catalog", func() {
 	})
 
 	It("prunes segments by overlapping time window", func() {
-		catalog, err := loge.OpenCatalog(dir)
+		catalog, err := managers.OpenCatalog(dir)
 		Expect(err).NotTo(HaveOccurred())
 		defer func() { _ = catalog.Close() }()
 
-		Expect(catalog.Upsert(loge.SegmentMeta{
-			ID: "segment-1.sqlite.zst", Location: loge.LocationLocal, LocalPath: "/tmp/segment-1.sqlite.zst",
+		Expect(catalog.Upsert(managers.SegmentMeta{
+			ID: "segment-1.sqlite.zst", Location: managers.LocationLocal, LocalPath: "/tmp/segment-1.sqlite.zst",
 			MinTimestamp: 100, MaxTimestamp: 200, RowCount: 10, LabelKeys: []string{"app"}, SealedAt: 1,
 		})).To(Succeed())
-		Expect(catalog.Upsert(loge.SegmentMeta{
-			ID: "segment-2.sqlite.zst", Location: loge.LocationLocal, LocalPath: "/tmp/segment-2.sqlite.zst",
+		Expect(catalog.Upsert(managers.SegmentMeta{
+			ID: "segment-2.sqlite.zst", Location: managers.LocationLocal, LocalPath: "/tmp/segment-2.sqlite.zst",
 			MinTimestamp: 1000, MaxTimestamp: 2000, RowCount: 20, LabelKeys: []string{"env"}, SealedAt: 2,
 		})).To(Succeed())
 
@@ -52,12 +53,12 @@ var _ = Describe("Catalog", func() {
 	})
 
 	It("flips a segment to remote and lists rotation candidates", func() {
-		catalog, err := loge.OpenCatalog(dir)
+		catalog, err := managers.OpenCatalog(dir)
 		Expect(err).NotTo(HaveOccurred())
 		defer func() { _ = catalog.Close() }()
 
-		Expect(catalog.Upsert(loge.SegmentMeta{
-			ID: "segment-1.sqlite.zst", Location: loge.LocationLocal, LocalPath: "/tmp/segment-1.sqlite.zst",
+		Expect(catalog.Upsert(managers.SegmentMeta{
+			ID: "segment-1.sqlite.zst", Location: managers.LocationLocal, LocalPath: "/tmp/segment-1.sqlite.zst",
 			MinTimestamp: 100, MaxTimestamp: 200, RowCount: 10, SealedAt: 1,
 		})).To(Succeed())
 
@@ -69,7 +70,7 @@ var _ = Describe("Catalog", func() {
 
 		overlapping, err := catalog.Overlapping(0, 0)
 		Expect(err).NotTo(HaveOccurred())
-		Expect(overlapping[0].Location).To(Equal(loge.LocationRemote))
+		Expect(overlapping[0].Location).To(Equal(managers.LocationRemote))
 		Expect(overlapping[0].RemoteURL).To(Equal("https://host/segment-1.sqlite.zst"))
 
 		// No longer a local rotation candidate.
@@ -90,7 +91,7 @@ var _ = Describe("Catalog", func() {
 			}
 		}
 
-		produceSegment := func(catalog *loge.Catalog) {
+		produceSegment := func(catalog *managers.Catalog) {
 			buckets, err := loge.NewBuckets(context.Background(), 1, 1, dir, false)
 			Expect(err).NotTo(HaveOccurred())
 
@@ -118,7 +119,7 @@ var _ = Describe("Catalog", func() {
 		}
 
 		It("records each compacted segment in the catalog", func() {
-			catalog, err := loge.OpenCatalog(dir)
+			catalog, err := managers.OpenCatalog(dir)
 			Expect(err).NotTo(HaveOccurred())
 			defer func() { _ = catalog.Close() }()
 
@@ -127,7 +128,7 @@ var _ = Describe("Catalog", func() {
 			segments, err := catalog.List()
 			Expect(err).NotTo(HaveOccurred())
 			Expect(segments).To(HaveLen(1))
-			Expect(segments[0].Location).To(Equal(loge.LocationLocal))
+			Expect(segments[0].Location).To(Equal(managers.LocationLocal))
 			Expect(segments[0].RowCount).To(Equal(int64(5)))
 			Expect(segments[0].MinTimestamp).To(Equal(int64(1_700_000_000_000_000_000)))
 			Expect(segments[0].LabelKeys).To(ContainElement("app"))
@@ -138,13 +139,13 @@ var _ = Describe("Catalog", func() {
 			// Produce a segment WITHOUT a catalog, then reconcile a fresh one.
 			produceSegment(nil)
 
-			catalog, err := loge.OpenCatalog(dir)
+			catalog, err := managers.OpenCatalog(dir)
 			Expect(err).NotTo(HaveOccurred())
 			defer func() { _ = catalog.Close() }()
 
 			// Stale row for a file that does not exist should be dropped.
-			Expect(catalog.Upsert(loge.SegmentMeta{
-				ID: "segment-gone.sqlite.zst", Location: loge.LocationLocal, LocalPath: "/tmp/gone.sqlite.zst",
+			Expect(catalog.Upsert(managers.SegmentMeta{
+				ID: "segment-gone.sqlite.zst", Location: managers.LocationLocal, LocalPath: "/tmp/gone.sqlite.zst",
 				MinTimestamp: 1, MaxTimestamp: 2, RowCount: 1, SealedAt: 1,
 			})).To(Succeed())
 

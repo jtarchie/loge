@@ -26,7 +26,7 @@ import (
 const (
 	walHeaderSize            = 4
 	walChecksumSize          = 4
-	defaultWALMaxSegmentSize = 64 << 20 // 64 MiB
+	defaultWALMaxSegmentSize = 64 << 20  // 64 MiB
 	walMaxRecordSize         = 256 << 20 // sanity bound to reject garbage lengths
 )
 

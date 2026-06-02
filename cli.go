@@ -75,7 +75,10 @@ func (c *CLI) Run() error {
 		// The bucket worker will handle the payload lifecycle
 		buckets.Append(*payload)
 
-		return context.String(http.StatusOK, "")
+		// 202 Accepted: the payload is queued for asynchronous flushing and is
+		// not yet durably on disk. This becomes 200 once a write-ahead log
+		// makes ingestion durable before acknowledgement.
+		return context.NoContent(http.StatusAccepted)
 	})
 
 	router.GET("/api/v1/labels", func(context echo.Context) error {

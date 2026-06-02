@@ -77,7 +77,7 @@ var _ = Describe("Running the application", func() {
 				Post(fmt.Sprintf("http://localhost:%d/api/v1/push", port))
 
 			return response.StatusCode
-		}).Should(Equal(http.StatusOK))
+		}).Should(Equal(http.StatusAccepted))
 
 		Eventually(func() int {
 			matches, _ := filepath.Glob(filepath.Join(outputPath, "*.sqlite.zst"))
@@ -166,7 +166,7 @@ var _ = Describe("Running the application", func() {
 				Post(fmt.Sprintf("http://localhost:%d/api/v1/push", port))
 
 			return response.StatusCode
-		}).Should(Equal(http.StatusOK))
+		}).Should(Equal(http.StatusAccepted))
 
 		Eventually(func() int {
 			matches, _ := filepath.Glob(filepath.Join(outputPath, "*.sqlite.zst"))

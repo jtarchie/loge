@@ -154,17 +154,27 @@ func (b *Buckets) bucketWorker(index int, payloadSize int, flushers *worker.Work
 			return
 		}
 
-		// During shutdown (blocking=false), use shorter timeouts
+		// Shutdown path (blocking=false). The flusher pool is still draining at
+		// this point (it is closed only after every bucket worker has finished,
+		// see Buckets.Close), so a blocking enqueue makes progress and will be
+		// accepted. Block to guarantee no data loss, unless the operator
+		// explicitly opted into dropping on backpressure.
 		if !blocking {
-			// Try once with short timeout, don't retry forever during shutdown
-			if flushers.Enqueue(payloads, worker.WithTimeout(time.Second)) {
+			if b.dropOnBackpressure {
+				if !flushers.Enqueue(payloads, worker.WithTimeout(time.Second)) {
+					slog.Warn("shutdown flush timeout, dropping data",
+						slog.Int("bucket", index),
+						slog.Int("payloads", len(payloads)),
+					)
+				}
 				payloads = make([]Payload, 0, payloadSize)
-			} else {
-				slog.Warn("shutdown flush timeout, data will be processed by flusher close",
-					slog.Int("bucket", index),
-					slog.Int("payloads", len(payloads)),
-				)
+
+				return
 			}
+
+			flushers.Enqueue(payloads) // blocks until the flusher accepts it
+			payloads = make([]Payload, 0, payloadSize)
+
 			return
 		}
 

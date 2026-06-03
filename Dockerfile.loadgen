@@ -1,0 +1,16 @@
+# loge-loadgen image. The generator is pure Go (no sqlite/CGO), so it builds
+# static and runs from scratch — tiny and fast to ship as a one-off Fly machine.
+FROM golang:1.25-bookworm AS build
+
+WORKDIR /src
+COPY go.mod go.sum ./
+RUN go mod download
+COPY . .
+
+ENV CGO_ENABLED=0
+RUN go build -o /loge-loadgen ./cmd/loge-loadgen
+
+FROM gcr.io/distroless/static-debian12
+
+COPY --from=build /loge-loadgen /usr/local/bin/loge-loadgen
+ENTRYPOINT ["/usr/local/bin/loge-loadgen"]

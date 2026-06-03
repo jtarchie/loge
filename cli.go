@@ -47,6 +47,18 @@ type QueryResponse struct {
 	Data   []managers.QueryEntry `json:"data"`
 }
 
+// StatsResponse summarizes the catalog (segment tiering, row count, time span)
+// for benchmarking and observability.
+type StatsResponse struct {
+	Status         string `json:"status"`
+	SegmentsTotal  int    `json:"segments_total"`
+	SegmentsLocal  int    `json:"segments_local"`
+	SegmentsRemote int    `json:"segments_remote"`
+	RowsTotal      int64  `json:"rows_total"`
+	MinTimestamp   int64  `json:"min_timestamp"`
+	MaxTimestamp   int64  `json:"max_timestamp"`
+}
+
 // CLI is the top-level command. The server is the default command (so bare
 // flags like `loge --port 6500` still start it), and `loge search` queries a
 // running server. CLI itself has no Run() method on purpose: kong invokes the
@@ -73,10 +85,10 @@ type ServeCmd struct {
 
 	// S3 tiered storage (rotate old segments to S3, read them back over HTTP).
 	// Leave --s3-bucket empty to keep everything local.
-	S3Bucket         string        `name:"s3-bucket"            default:""      help:"S3 bucket to rotate old segments into (empty disables S3 tiering)"`
+	S3Bucket         string        `name:"s3-bucket"            env:"BUCKET_NAME"         default:""      help:"S3 bucket to rotate old segments into (empty disables S3 tiering)"`
 	S3Prefix         string        `name:"s3-prefix"            default:"loge/" help:"key prefix for uploaded segments"`
-	S3Endpoint       string        `name:"s3-endpoint"          default:""      help:"custom S3 endpoint (e.g. MinIO); empty uses AWS"`
-	S3Region         string        `name:"s3-region"            default:""      help:"S3 region (else from the AWS environment)"`
+	S3Endpoint       string        `name:"s3-endpoint"          env:"AWS_ENDPOINT_URL_S3" default:""      help:"custom S3 endpoint (e.g. MinIO/Tigris); empty uses AWS"`
+	S3Region         string        `name:"s3-region"            env:"AWS_REGION"          default:""      help:"S3 region (else from the AWS environment)"`
 	S3ForcePathStyle bool          `name:"s3-force-path-style"  default:"false" help:"use path-style S3 addressing (needed for MinIO)"`
 	S3ReadURLBase    string        `name:"s3-read-url-base"     default:""      help:"public/CDN base URL reads are served from; empty derives from bucket/region/endpoint"`
 	S3ACL            string        `name:"s3-acl"               default:""      help:"canned ACL for uploaded objects (e.g. public-read); empty relies on bucket policy"`
@@ -280,6 +292,39 @@ func (c *ServeCmd) Run() error {
 			Status: "success",
 			Data:   labels,
 		})
+	})
+
+	// Stats summarizes the catalog so benchmarks can observe tiering (local vs
+	// remote segment counts), total rows, and the indexed time span.
+	router.GET("/api/v1/stats", func(context *echo.Context) error {
+		segments, err := catalog.List()
+		if err != nil {
+			return fmt.Errorf("could not list segments: %w", err)
+		}
+
+		stats := StatsResponse{Status: "success"}
+
+		for index, segment := range segments {
+			stats.SegmentsTotal++
+
+			if segment.Location == managers.LocationRemote {
+				stats.SegmentsRemote++
+			} else {
+				stats.SegmentsLocal++
+			}
+
+			stats.RowsTotal += segment.RowCount
+
+			if index == 0 || segment.MinTimestamp < stats.MinTimestamp {
+				stats.MinTimestamp = segment.MinTimestamp
+			}
+
+			if segment.MaxTimestamp > stats.MaxTimestamp {
+				stats.MaxTimestamp = segment.MaxTimestamp
+			}
+		}
+
+		return context.JSON(http.StatusOK, &stats)
 	})
 
 	router.POST("/api/v1/query", func(context *echo.Context) error {

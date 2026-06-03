@@ -191,3 +191,31 @@ tasks:
       
       echo ""
       echo "All benchmarks (drop mode) complete!"
+  bench:loadgen:
+    desc: 'Build + run the realistic Go log generator (vars: TARGET, RATE, DURATION)'
+    cmds:
+    - go build -o /tmp/loge-loadgen ./cmd/loge-loadgen
+    - '/tmp/loge-loadgen --target {{.TARGET | default "http://localhost:6500"}} --rate {{.RATE | default 4000}} --duration {{.DURATION | default "60s"}}'
+  bench:query:
+    desc: 'Run the k6 query scenarios — label, hot, cold, keyword (var: BASE)'
+    cmds:
+    - 'BASE={{.BASE | default "http://localhost:6500"}} k6 run benchmark/query/label.js'
+    - 'BASE={{.BASE | default "http://localhost:6500"}} k6 run benchmark/query/hot.js'
+    - 'BASE={{.BASE | default "http://localhost:6500"}} k6 run benchmark/query/cold.js'
+    - 'BASE={{.BASE | default "http://localhost:6500"}} k6 run benchmark/query/keyword.js'
+  bench:stats:
+    desc: 'Show catalog tiering stats: local vs remote segments, rows, span (var: BASE)'
+    cmds:
+    - 'curl -s {{.BASE | default "http://localhost:6500"}}/api/v1/stats'
+  bench:fly:storage:
+    desc: 'Provision a Tigris bucket and set its secrets on the Fly app'
+    cmds:
+    - fly storage create
+  bench:fly:deploy:
+    desc: 'Deploy the loge benchmark app to Fly.io'
+    cmds:
+    - fly deploy
+  bench:fly:teardown:
+    desc: 'Destroy the Fly app and its volume (DESTRUCTIVE)'
+    cmds:
+    - fly apps destroy loge-bench

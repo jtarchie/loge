@@ -1,0 +1,53 @@
+# loge benchmark deployment on Fly.io with Tigris as the cold tier.
+#
+# Setup (once):
+#   fly launch --no-deploy --copy-config --name loge-bench
+#   fly volumes create loge_data --region <region> --size 20   # hot tier
+#   fly storage create                                         # provisions Tigris,
+#       # sets BUCKET_NAME / AWS_ENDPOINT_URL_S3 / AWS_REGION / AWS_* secrets
+#   # make the bucket public so loge can read segments back (see benchmark/README.md)
+#   fly deploy
+#
+# loge reads --s3-bucket/--s3-endpoint/--s3-region from those secrets (kong env
+# tags); entrypoint.sh supplies the loge-specific S3 flags.
+
+app = "loge-bench"
+primary_region = "iad"
+
+[build]
+  dockerfile = "Dockerfile"
+
+[env]
+  PORT = "8080"
+  OUTPUT_PATH = "/data"
+  # Aggressive rotation so segments tier to Tigris *during* the run, creating the
+  # hot (local) / cold (S3) split the search benchmark needs.
+  S3_ROTATE_AGE = "2m"
+  S3_ROTATE_INTERVAL = "30s"
+  COMPACT_INTERVAL = "15s"
+
+[http_service]
+  internal_port = 8080
+  force_https = true
+  auto_stop_machines = false
+  auto_start_machines = true
+  min_machines_running = 1
+
+[[http_service.checks]]
+  method = "GET"
+  path = "/api/v1/labels"
+  interval = "15s"
+  timeout = "5s"
+  grace_period = "20s"
+
+# Hot tier: flush files, WAL, catalog.sqlite, and recent (not-yet-rotated)
+# segments. Cold data lives in Tigris, so size this for the hot window only.
+[mounts]
+  source = "loge_data"
+  destination = "/data"
+
+# Compaction + FTS index builds are CPU/RAM bound; size up for ingest throughput.
+[[vm]]
+  cpu_kind = "performance"
+  cpus = 2
+  memory = "4gb"

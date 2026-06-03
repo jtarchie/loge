@@ -150,6 +150,29 @@ var _ = Describe("Query over remote (HTTP) segments", func() {
 			Expect(entry.Labels).To(HaveKeyWithValue("app", "db"))
 		}
 	})
+
+	It("matches a multi-word keyword via first-word MATCH narrowed by the LIKE refine", func() {
+		early := int64(1_700_000_000_000_000_000)
+		produceRemoteSegment(early, 5, "web") // lines "web line 0".."web line 4"
+
+		manager, err := managers.NewLocal(dir, managers.WithCatalog(catalog))
+		Expect(err).NotTo(HaveOccurred())
+		DeferCleanup(func() { _ = manager.Close() })
+
+		// Remote path MATCHes only the first word ("web", which over-matches all 5
+		// lines), then the full-keyword LIKE refines to the one exact line.
+		hits, err := manager.Query(context.Background(), managers.QueryRequest{Line: "web line 3"})
+		Expect(err).NotTo(HaveOccurred())
+		Expect(hits).To(HaveLen(1))
+		Expect(hits[0].Line).To(Equal("web line 3"))
+		Expect(requests.Load()).To(BeNumerically(">", 0))
+
+		// First word present but full phrase absent: the LIKE must reject every
+		// MATCH candidate, so the result is empty (correctness rests on the LIKE).
+		none, err := manager.Query(context.Background(), managers.QueryRequest{Line: "web line 99"})
+		Expect(err).NotTo(HaveOccurred())
+		Expect(none).To(BeEmpty())
+	})
 })
 
 // produceSegmentLocal ingests and compacts a segment that stays local.

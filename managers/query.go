@@ -10,6 +10,7 @@ import (
 	"sort"
 	"strings"
 	"sync"
+	"unicode/utf8"
 
 	"github.com/georgysavva/scany/v2/sqlscan"
 )
@@ -97,7 +98,7 @@ func (m *Local) Query(ctx context.Context, req QueryRequest) ([]QueryEntry, erro
 		// not depend on the index.
 		useLineIndex := req.Line != "" && len(req.Line) >= 3 && m.hasLineSearch(ctx, src.dsn, client)
 
-		sqlText, args := buildQuery(req, limit, useLineIndex)
+		sqlText, args := buildQuery(req, limit, useLineIndex, isHTTP(src.dsn))
 
 		var rows []queryRow
 		if err := sqlscan.Select(ctx, client, &rows, sqlText, args...); err != nil {
@@ -200,8 +201,12 @@ func fileOverlaps(ctx context.Context, client *sql.DB, start, end int64) (bool, 
 // buildQuery assembles the per-file SQL and its arguments. Each file returns at
 // most limit rows (newest first); the caller merges across files. When
 // useLineIndex is set the trigram line_search index is joined in to accelerate
-// the line filter (the literal LIKE still runs as the exact filter).
-func buildQuery(req QueryRequest, limit int, useLineIndex bool) (string, []any) {
+// the line filter (the literal LIKE still runs as the exact filter). For remote
+// (S3) sources we MATCH only the keyword's first word — a single, cheaper
+// trigram probe that means fewer random reads over HTTP — and let the LIKE
+// refine; local sources keep the full-phrase MATCH (random reads are cheap on
+// SSD, where a more selective MATCH wins).
+func buildQuery(req QueryRequest, limit int, useLineIndex, remote bool) (string, []any) {
 	var sb strings.Builder
 
 	sb.WriteString(`SELECT s.timestamp AS timestamp, s.line AS line, json(l.payload) AS labels
@@ -209,15 +214,29 @@ func buildQuery(req QueryRequest, limit int, useLineIndex bool) (string, []any) 
 
 	args := make([]any, 0, len(req.Matchers)+4)
 
-	if useLineIndex {
+	// The MATCH term must be a necessary condition for the full-keyword LIKE: the
+	// whole keyword always is, and so is its first word (a substring of it) at a
+	// fraction of the trigram probes — preferred for remote sources.
+	matchTerm := req.Line
+	useMatch := useLineIndex
+
+	if useLineIndex && remote {
+		if word, ok := firstIndexableWord(req.Line); ok {
+			matchTerm = word
+		} else {
+			useMatch = false // no token long enough to trigram-match; LIKE only
+		}
+	}
+
+	if useMatch {
 		sb.WriteString(" JOIN line_search ON line_search.rowid = s.id")
 	}
 
 	sb.WriteString(" WHERE 1 = 1")
 
-	if useLineIndex {
+	if useMatch {
 		sb.WriteString(" AND line_search MATCH ?")
-		args = append(args, `"`+strings.ReplaceAll(req.Line, `"`, `""`)+`"`)
+		args = append(args, `"`+strings.ReplaceAll(matchTerm, `"`, `""`)+`"`)
 	}
 
 	if req.Start != 0 {
@@ -300,6 +319,22 @@ func matchesRegex(labels map[string]string, matchers []regexMatcher) bool {
 // dots or other special characters are handled correctly.
 func jsonPath(name string) string {
 	return `$."` + strings.ReplaceAll(name, `"`, `""`) + `"`
+}
+
+// firstIndexableWord returns the first whitespace-delimited token of line that
+// is at least three runes long (the trigram minimum), usable as a
+// necessary-condition MATCH term. Any token is a substring of the keyword, so a
+// line matching the full keyword always matches the token's trigrams too. ok is
+// false when no token qualifies, in which case the caller skips the MATCH and
+// relies on the LIKE scan.
+func firstIndexableWord(line string) (string, bool) {
+	for _, field := range strings.Fields(line) {
+		if utf8.RuneCountInString(field) >= 3 {
+			return field, true
+		}
+	}
+
+	return "", false
 }
 
 // escapeLike escapes the LIKE wildcards in a literal substring filter.

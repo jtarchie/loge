@@ -3,8 +3,9 @@
 FROM golang:1.25-bookworm AS build
 
 WORKDIR /src
-COPY go.mod go.sum ./
-RUN go mod download
+# Copy the whole tree before any go command: go.mod has
+# `replace github.com/jtarchie/worker => ./worker` (a git submodule), so the
+# local module must be present before modules are resolved.
 COPY . .
 
 ENV CGO_ENABLED=1

@@ -159,6 +159,32 @@ fly storage destroy <bucket>       # or keep for re-runs
 
 ---
 
+## Sample run + findings
+
+A first run on Fly `iad` (one `performance-2x`: 2 CPU / 4 GB, 20 GB volume, public
+Tigris bucket), ~4 min ingest:
+
+- **Ingest:** 4.78 M lines @ **~19,900 lines/s, 0 errors** (948 MB on the wire).
+- **Tiering:** 3 of 5 segments rotated to Tigris; local hot tier stayed ~183 MB (the
+  rest is zstd-compressed on Tigris). Cold reads over the public bucket worked with no
+  degradation.
+- **Per-query latency (single VU):** label (unbounded) p95 **84 ms**, hot window p95
+  **55 ms**, cold window over Tigris p95 **74 ms**, keyword bounded to local **130 ms**,
+  keyword against a single Tigris segment **1.2 s**.
+
+⚠️ **The one cliff — unbounded FTS keyword search across multiple Tigris segments: ~37 s**
+(vs 1.1 s for an unbounded *label* scan over the same segments). Trigram index lookups
+are many small *random* reads; over HTTP range-GETs that is pathological, whereas
+timestamp-range scans read large contiguous chunks. Takeaways:
+
+- **Always time-bound keyword searches** — the catalog then prunes remote segments and
+  the slow remote-FTS path is avoided (bounded keyword was 130 ms–1.2 s).
+- High query concurrency on a 2-CPU machine was dominated by this scenario; scale CPUs
+  and/or bound queries for real QPS. A worthwhile future optimization is prefetching or
+  caching the FTS index for remote segments (or capping FTS fan-out across them).
+
+---
+
 ## Files
 
 - `cmd/loge-loadgen/` — realistic, CGO-free Go log generator.

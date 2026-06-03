@@ -3,6 +3,7 @@ package loge
 import (
 	"context"
 	"database/sql"
+	"encoding/base64"
 	"fmt"
 	"log/slog"
 	"math"
@@ -13,6 +14,37 @@ import (
 
 	"github.com/jtarchie/loge/managers"
 )
+
+// buildLineFilter scans the segment's lines (in the open transaction) and builds
+// a serialized trigram filter used to skip the whole segment for keyword queries
+// it cannot match.
+func buildLineFilter(tx *sql.Tx) ([]byte, error) {
+	rows, err := tx.Query("SELECT line FROM streams")
+	if err != nil {
+		return nil, fmt.Errorf("could not read lines for filter: %w", err)
+	}
+	defer func() {
+		_ = rows.Close()
+	}()
+
+	hashes := map[uint64]struct{}{}
+
+	for rows.Next() {
+		var line string
+
+		if err := rows.Scan(&line); err != nil {
+			return nil, fmt.Errorf("could not scan line: %w", err)
+		}
+
+		managers.AddTrigramHashes(line, hashes)
+	}
+
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("could not read lines: %w", err)
+	}
+
+	return managers.BuildLineFilter(hashes)
+}
 
 const (
 	// defaultCompactMinFiles is the number of small flush files that must
@@ -205,9 +237,16 @@ func (c *Compactor) merge(sources []string) error {
 	// (and a fresh catalog can be rebuilt from an S3 listing) without opening it.
 	base := filepath.Join(c.dir, managers.FormatSegmentName(minTimestamp, maxTimestamp, sealedAt))
 
+	// Build a trigram filter of the segment's lines so keyword queries can skip
+	// this whole segment (zero file/S3 reads) when it can't contain the term.
+	lineFilter, err := buildLineFilter(transaction)
+	if err != nil {
+		return fmt.Errorf("could not build line filter: %w", err)
+	}
+
 	if _, err := transaction.Exec(
-		`INSERT INTO metadata (key, value) VALUES ('minTimestamp', ?), ('maxTimestamp', ?);`,
-		minTimestamp, maxTimestamp,
+		`INSERT INTO metadata (key, value) VALUES ('minTimestamp', ?), ('maxTimestamp', ?), ('lineFilter', ?);`,
+		minTimestamp, maxTimestamp, base64.StdEncoding.EncodeToString(lineFilter),
 	); err != nil {
 		return fmt.Errorf("could not write segment metadata: %w", err)
 	}

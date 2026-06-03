@@ -143,7 +143,9 @@ func (m *Local) watcherSources() []querySource {
 // sources returns every source to query for the [start,end] window (0 meaning
 // unbounded): local flush files from the watcher plus catalog segments pruned
 // to the window (resolved to a local copy when present, else their remote URL).
-func (m *Local) sources(start, end int64) ([]querySource, error) {
+// When line is set, catalog segments whose trigram filter proves they cannot
+// contain it are pruned too — with no file/S3 read.
+func (m *Local) sources(start, end int64, line string) ([]querySource, error) {
 	var sources []querySource
 
 	// Local flush files are tracked by the watcher. Prune them by their
@@ -171,6 +173,13 @@ func (m *Local) sources(start, end int64) ([]querySource, error) {
 		}
 
 		for _, segment := range segments {
+			// Skip segments whose trigram filter proves they cannot contain the
+			// keyword — zero file/S3 reads. Segments without a filter (older, or
+			// rebuilt from an S3 listing) fall through and are scanned.
+			if line != "" && !LineFilterMayContain(segment.LineFilter, line) {
+				continue
+			}
+
 			dsn := segment.RemoteURL
 
 			if segment.LocalPath != "" {

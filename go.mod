@@ -3,6 +3,7 @@ module github.com/jtarchie/loge
 go 1.25.0
 
 require (
+	github.com/FastFilter/xorfilter v0.5.1
 	github.com/SaveTheRbtz/zstd-seekable-format-go/pkg v0.9.0
 	github.com/alecthomas/kong v1.15.0
 	github.com/aws/aws-sdk-go-v2 v1.41.9

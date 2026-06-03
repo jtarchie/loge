@@ -69,7 +69,7 @@ func (m *Local) Query(ctx context.Context, req QueryRequest) ([]QueryEntry, erro
 		return nil, err
 	}
 
-	sources, err := m.sources(req.Start, req.End)
+	sources, err := m.sources(req.Start, req.End, req.Line)
 	if err != nil {
 		return nil, err
 	}

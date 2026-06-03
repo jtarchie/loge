@@ -173,6 +173,30 @@ var _ = Describe("Query over remote (HTTP) segments", func() {
 		Expect(err).NotTo(HaveOccurred())
 		Expect(none).To(BeEmpty())
 	})
+
+	It("skips a remote segment whose trigram filter rejects the keyword (zero HTTP reads)", func() {
+		early := int64(1_700_000_000_000_000_000)
+		produceRemoteSegment(early, 5, "web") // lines "web line 0".."web line 4"
+
+		manager, err := managers.NewLocal(dir, managers.WithCatalog(catalog))
+		Expect(err).NotTo(HaveOccurred())
+		DeferCleanup(func() { _ = manager.Close() })
+
+		// A keyword whose trigrams are absent from the segment is pruned by the
+		// catalog filter — the segment is never fetched over HTTP.
+		requests.Store(0)
+		results, err := manager.Query(context.Background(), managers.QueryRequest{Line: "qwxzjvkbmp"})
+		Expect(err).NotTo(HaveOccurred())
+		Expect(results).To(BeEmpty())
+		Expect(requests.Load()).To(Equal(int64(0)), "filter must skip the segment with zero HTTP reads")
+
+		// Sanity: a present keyword still fetches the segment and returns its row.
+		requests.Store(0)
+		hits, err := manager.Query(context.Background(), managers.QueryRequest{Line: "web line 3"})
+		Expect(err).NotTo(HaveOccurred())
+		Expect(hits).To(HaveLen(1))
+		Expect(requests.Load()).To(BeNumerically(">", 0))
+	})
 })
 
 // produceSegmentLocal ingests and compacts a segment that stays local.

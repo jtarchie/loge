@@ -6,6 +6,7 @@ import (
 	"log/slog"
 	"os"
 	"path"
+	"strings"
 	"time"
 
 	"github.com/jtarchie/loge/managers"
@@ -15,6 +16,7 @@ const (
 	defaultRotateAge      = time.Hour
 	defaultRotateInterval = time.Minute
 	defaultRotateGrace    = time.Minute
+	defaultUploaderVFS    = "zstd"
 )
 
 // ObjectStore is the remote storage the uploader rotates segments to. It is an
@@ -25,6 +27,10 @@ type ObjectStore interface {
 	Put(ctx context.Context, key, localPath string) (readURL string, err error)
 	// Size returns the size of the stored object, for upload verification.
 	Size(ctx context.Context, key string) (int64, error)
+	// List returns the object keys stored under prefix.
+	List(ctx context.Context, prefix string) ([]string, error)
+	// ReadURL returns the public HTTP URL a key is read back from.
+	ReadURL(key string) string
 }
 
 // Uploader rotates compacted segments older than a threshold to an ObjectStore
@@ -35,6 +41,7 @@ type Uploader struct {
 	catalog  *managers.Catalog
 	store    ObjectStore
 	prefix   string
+	vfsName  string
 	age      time.Duration
 	grace    time.Duration
 	interval time.Duration
@@ -79,12 +86,23 @@ func WithUploadPrefix(prefix string) UploaderOption {
 	}
 }
 
+// WithUploaderVFS sets the sqlite VFS name used to open remote segments when
+// ReconcileRemote must fall back to reading a legacy-named segment over HTTP.
+func WithUploaderVFS(name string) UploaderOption {
+	return func(u *Uploader) {
+		if name != "" {
+			u.vfsName = name
+		}
+	}
+}
+
 // NewUploader builds an Uploader for dir.
 func NewUploader(dir string, catalog *managers.Catalog, store ObjectStore, opts ...UploaderOption) *Uploader {
 	uploader := &Uploader{
 		dir:      dir,
 		catalog:  catalog,
 		store:    store,
+		vfsName:  defaultUploaderVFS,
 		age:      defaultRotateAge,
 		grace:    defaultRotateGrace,
 		interval: defaultRotateInterval,
@@ -95,6 +113,82 @@ func NewUploader(dir string, catalog *managers.Catalog, store ObjectStore, opts 
 	}
 
 	return uploader
+}
+
+// ReconcileRemote rebuilds catalog rows for remote (S3) segments from a bucket
+// listing alone, so a fresh server with an empty catalog rediscovers cold-tier
+// segments without opening any file. Keys whose bounds are encoded in the
+// filename are cataloged from the name; legacy-named keys fall back to opening
+// the segment over HTTP (the expensive path). It returns how many remote rows
+// it added. Run it once at startup before the rotation loop starts.
+func (u *Uploader) ReconcileRemote(ctx context.Context) (int, error) {
+	keys, err := u.store.List(ctx, u.prefix)
+	if err != nil {
+		return 0, fmt.Errorf("could not list remote segments: %w", err)
+	}
+
+	existing, err := u.catalog.List()
+	if err != nil {
+		return 0, fmt.Errorf("could not read catalog: %w", err)
+	}
+
+	known := make(map[string]struct{}, len(existing))
+	for _, segment := range existing {
+		known[segment.ID] = struct{}{}
+	}
+
+	added := 0
+
+	for _, key := range keys {
+		id := path.Base(key)
+
+		// Only compacted segment objects are catalog rows; ignore anything else
+		// stored under the prefix.
+		if !strings.HasPrefix(id, "segment-") || !strings.HasSuffix(id, ".sqlite.zst") {
+			continue
+		}
+
+		if _, ok := known[id]; ok {
+			continue // already cataloged (local or remote)
+		}
+
+		remoteURL := u.store.ReadURL(key)
+
+		meta := managers.SegmentMeta{
+			ID:        id,
+			Location:  managers.LocationRemote,
+			RemoteURL: remoteURL,
+		}
+
+		if bounds, ok := managers.ParseBounds(id); ok {
+			meta.MinTimestamp = bounds.Min
+			meta.MaxTimestamp = bounds.Max
+		} else {
+			// Legacy name without encoded bounds: open the segment over HTTP to
+			// derive its metadata. This is the expensive path.
+			slog.Warn("remote segment has a legacy name; opening it over HTTP to derive bounds",
+				slog.String("key", key))
+
+			derived, err := managers.DeriveRemoteSegmentMeta(remoteURL, u.vfsName)
+			if err != nil {
+				slog.Error("could not derive remote segment metadata; skipping",
+					slog.String("key", key), slog.String("error", err.Error()))
+
+				continue
+			}
+
+			meta = derived
+			meta.ID = id
+		}
+
+		if err := u.catalog.Upsert(meta); err != nil {
+			return added, fmt.Errorf("could not catalog remote segment %q: %w", id, err)
+		}
+
+		added++
+	}
+
+	return added, nil
 }
 
 // Run rotates and sweeps on a ticker until ctx is cancelled.

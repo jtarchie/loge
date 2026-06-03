@@ -14,6 +14,7 @@ import (
 	"time"
 
 	seekable "github.com/SaveTheRbtz/zstd-seekable-format-go/pkg"
+	"github.com/jtarchie/loge/managers"
 	"github.com/jtarchie/worker"
 	"github.com/klauspost/compress/zstd"
 	_ "github.com/mattn/go-sqlite3"
@@ -166,7 +167,7 @@ func NewBuckets(
 	})
 
 	buckets.flushers = worker.NewWithContext(ctx, size, max(size/2, 2), func(index int, job flushJob) {
-		filename, err := flusher(job.payloads, outputPath, fmt.Sprintf("bucket-%d", index))
+		filename, err := flusher(job.payloads, outputPath, index)
 		if err != nil {
 			slog.Error("could not flush payloads", slog.Int("index", index), slog.String("error", err.Error()))
 		} else {
@@ -366,8 +367,13 @@ func (b *Buckets) Close() error {
 	return nil
 }
 
-func flusher(payloads []Payload, outputDir string, prefix string) (string, error) {
-	filename := filepath.Join(outputDir, fmt.Sprintf("%s-%d.sqlite", prefix, time.Now().UnixNano()))
+func flusher(payloads []Payload, outputDir string, index int) (string, error) {
+	// The final name encodes the batch's min/max timestamps, but those are only
+	// known after the rows are written. Use a provisional, bounds-less name for
+	// the temp file (and error messages); the real published name is computed
+	// below once the bounds are known.
+	seq := time.Now().UnixNano()
+	filename := filepath.Join(outputDir, fmt.Sprintf("bucket-%d-%d.sqlite", index, seq))
 	// Write to a temporary file and atomically rename on success so the
 	// compressor (and any reader) never observes a half-written database,
 	// which matters because the DB is written with journal_mode=OFF.
@@ -497,6 +503,11 @@ func flusher(payloads []Payload, outputDir string, prefix string) (string, error
 		maxTimestamp = 0
 	}
 
+	// Now that the batch's bounds are known, the published file is named to
+	// encode them, so the query path can prune it (and a fresh catalog can be
+	// rebuilt) from the filename alone.
+	finalName := filepath.Join(outputDir, managers.FormatFlushName(index, minTimestamp, maxTimestamp, seq))
+
 	// Batch insert labels
 	if err := batchInsertLabels(transaction, labels); err != nil {
 		return "", fmt.Errorf("could not insert labels %q: %w", filename, err)
@@ -536,12 +547,12 @@ func flusher(payloads []Payload, outputDir string, prefix string) (string, error
 		return "", fmt.Errorf("could not close sqlite: %w", err)
 	}
 
-	if err := os.Rename(tmpFilename, filename); err != nil {
-		return "", fmt.Errorf("could not finalize %q: %w", filename, err)
+	if err := os.Rename(tmpFilename, finalName); err != nil {
+		return "", fmt.Errorf("could not finalize %q: %w", finalName, err)
 	}
 	renamed = true
 
-	return filename, nil
+	return finalName, nil
 }
 
 func batchInsertLabels(tx *sql.Tx, labels []labelEntry) error {

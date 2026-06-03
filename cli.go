@@ -213,7 +213,21 @@ func (c *ServeCmd) Run() error {
 			WithRotateAge(c.S3RotateAge),
 			WithRotateGrace(c.S3RotateGrace),
 			WithRotateInterval(c.S3RotateInterval),
+			WithUploaderVFS(vfsName),
 		)
+
+		// Rebuild catalog rows for already-rotated (cold) segments from the
+		// bucket listing, so a fresh server with no local catalog can still see
+		// and query them. Degrade rather than fail: an S3 hiccup at boot still
+		// lets the server serve its local data.
+		if rediscovered, err := uploader.ReconcileRemote(ctx); err != nil {
+			slog.Warn("could not reconcile remote segments from S3 listing",
+				slog.String("error", err.Error()))
+		} else if rediscovered > 0 {
+			slog.Info("rediscovered remote segments from S3 listing",
+				slog.Int("segments", rediscovered))
+		}
+
 		go uploader.Run(ctx)
 	}
 

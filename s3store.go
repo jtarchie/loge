@@ -110,7 +110,38 @@ func (s *S3Store) Put(ctx context.Context, key, localPath string) (string, error
 		return "", fmt.Errorf("could not upload segment: %w", err)
 	}
 
-	return s.readURLBase + "/" + key, nil
+	return s.ReadURL(key), nil
+}
+
+// ReadURL returns the public, path-based HTTP URL a key is read back from.
+func (s *S3Store) ReadURL(key string) string {
+	return s.readURLBase + "/" + key
+}
+
+// List returns every object key stored under prefix, paginating through the
+// bucket listing.
+func (s *S3Store) List(ctx context.Context, prefix string) ([]string, error) {
+	var keys []string
+
+	paginator := s3.NewListObjectsV2Paginator(s.client, &s3.ListObjectsV2Input{
+		Bucket: aws.String(s.bucket),
+		Prefix: aws.String(prefix),
+	})
+
+	for paginator.HasMorePages() {
+		page, err := paginator.NextPage(ctx)
+		if err != nil {
+			return nil, fmt.Errorf("could not list objects: %w", err)
+		}
+
+		for _, object := range page.Contents {
+			if object.Key != nil {
+				keys = append(keys, *object.Key)
+			}
+		}
+	}
+
+	return keys, nil
 }
 
 // Size returns the stored object's size via HeadObject.

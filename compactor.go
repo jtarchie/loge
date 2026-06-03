@@ -134,8 +134,10 @@ func (c *Compactor) Compact() (int, error) {
 // trigram line index and supporting indexes built once.
 func (c *Compactor) merge(sources []string) error {
 	sealedAt := time.Now().UnixNano()
-	base := filepath.Join(c.dir, fmt.Sprintf("segment-%d.sqlite", sealedAt))
-	tmp := base + ".partial"
+	// The published name encodes the segment's min/max timestamps, but those are
+	// only known after the merge loop, so write to a provisional temp first and
+	// compute the real base name below.
+	tmp := filepath.Join(c.dir, fmt.Sprintf("segment-%d.sqlite.partial", sealedAt))
 
 	finalized := false
 	defer func() {
@@ -198,6 +200,10 @@ func (c *Compactor) merge(sources []string) error {
 		minTimestamp = 0
 		maxTimestamp = 0
 	}
+
+	// Name the published segment after its data bounds so queries can prune it
+	// (and a fresh catalog can be rebuilt from an S3 listing) without opening it.
+	base := filepath.Join(c.dir, managers.FormatSegmentName(minTimestamp, maxTimestamp, sealedAt))
 
 	if _, err := transaction.Exec(
 		`INSERT INTO metadata (key, value) VALUES ('minTimestamp', ?), ('maxTimestamp', ?);`,

@@ -366,22 +366,64 @@ func DeriveSegmentMeta(path string) (SegmentMeta, error) {
 		LocalPath: abs,
 	}
 
+	if err := readSegmentMeta(client, &meta); err != nil {
+		return SegmentMeta{}, err
+	}
+
+	return meta, nil
+}
+
+// DeriveRemoteSegmentMeta opens a remote segment over HTTP (via the seekable
+// zstd VFS named vfsName) to read its metadata. It is the expensive fallback
+// used by ReconcileRemote for legacy-named keys whose bounds cannot be parsed
+// from the filename. The returned row is remote.
+func DeriveRemoteSegmentMeta(remoteURL, vfsName string) (SegmentMeta, error) {
+	if vfsName == "" {
+		vfsName = "zstd"
+	}
+
+	client, err := sql.Open("sqlite3", remoteURL+"?vfs="+vfsName)
+	if err != nil {
+		return SegmentMeta{}, fmt.Errorf("could not open remote segment: %w", err)
+	}
+
+	client.SetMaxOpenConns(1)
+	defer func() {
+		_ = client.Close()
+	}()
+
+	meta := SegmentMeta{
+		ID:        filepath.Base(remoteURL),
+		Location:  LocationRemote,
+		RemoteURL: remoteURL,
+	}
+
+	if err := readSegmentMeta(client, &meta); err != nil {
+		return SegmentMeta{}, err
+	}
+
+	return meta, nil
+}
+
+// readSegmentMeta fills the time bounds, row count, and label keys of meta from
+// an open segment database.
+func readSegmentMeta(client *sql.DB, meta *SegmentMeta) error {
 	if err := client.QueryRow(`SELECT value FROM metadata WHERE key = 'minTimestamp'`).Scan(&meta.MinTimestamp); err != nil {
-		return SegmentMeta{}, fmt.Errorf("could not read minTimestamp: %w", err)
+		return fmt.Errorf("could not read minTimestamp: %w", err)
 	}
 
 	if err := client.QueryRow(`SELECT value FROM metadata WHERE key = 'maxTimestamp'`).Scan(&meta.MaxTimestamp); err != nil {
-		return SegmentMeta{}, fmt.Errorf("could not read maxTimestamp: %w", err)
+		return fmt.Errorf("could not read maxTimestamp: %w", err)
 	}
 
 	if err := client.QueryRow(`SELECT COUNT(*) FROM streams`).Scan(&meta.RowCount); err != nil {
-		return SegmentMeta{}, fmt.Errorf("could not count streams: %w", err)
+		return fmt.Errorf("could not count streams: %w", err)
 	}
 
 	var labelKeys []string
 	if err := sqlscan.Select(context.Background(), client, &labelKeys,
 		`SELECT DISTINCT json_each.key FROM labels, json_each(labels.payload)`); err != nil {
-		return SegmentMeta{}, fmt.Errorf("could not read label keys: %w", err)
+		return fmt.Errorf("could not read label keys: %w", err)
 	}
 
 	sort.Strings(labelKeys)
@@ -389,12 +431,12 @@ func DeriveSegmentMeta(path string) (SegmentMeta, error) {
 
 	encoded, err := json.Marshal(labelKeys)
 	if err != nil {
-		return SegmentMeta{}, fmt.Errorf("could not encode label keys: %w", err)
+		return fmt.Errorf("could not encode label keys: %w", err)
 	}
 
 	meta.LabelKeysRaw = string(encoded)
 
-	return meta, nil
+	return nil
 }
 
 // scan runs a query and decodes label keys. Caller holds c.mu.

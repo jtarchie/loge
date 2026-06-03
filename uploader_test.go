@@ -3,11 +3,14 @@ package loge_test
 import (
 	"context"
 	"fmt"
+	"io/fs"
 	"net/http"
 	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"strconv"
+	"strings"
+	"sync/atomic"
 	"time"
 
 	"github.com/jtarchie/loge"
@@ -39,7 +42,7 @@ func (s *fakeStore) Put(_ context.Context, key, localPath string) (string, error
 		return "", err
 	}
 
-	return s.baseURL + "/" + key, nil
+	return s.ReadURL(key), nil
 }
 
 func (s *fakeStore) Size(_ context.Context, key string) (int64, error) {
@@ -49,6 +52,41 @@ func (s *fakeStore) Size(_ context.Context, key string) (int64, error) {
 	}
 
 	return info.Size(), nil
+}
+
+func (s *fakeStore) ReadURL(key string) string {
+	return s.baseURL + "/" + key
+}
+
+func (s *fakeStore) List(_ context.Context, prefix string) ([]string, error) {
+	var keys []string
+
+	err := filepath.WalkDir(s.remoteDir, func(p string, d fs.DirEntry, err error) error {
+		if err != nil {
+			return err
+		}
+
+		if d.IsDir() {
+			return nil
+		}
+
+		rel, err := filepath.Rel(s.remoteDir, p)
+		if err != nil {
+			return err
+		}
+
+		rel = filepath.ToSlash(rel)
+		if strings.HasPrefix(rel, prefix) {
+			keys = append(keys, rel)
+		}
+
+		return nil
+	})
+	if err != nil {
+		return nil, err
+	}
+
+	return keys, nil
 }
 
 var _ = Describe("Uploader", func() {
@@ -128,5 +166,102 @@ var _ = Describe("Uploader", func() {
 		Expect(err).NotTo(HaveOccurred())
 		Expect(results).To(HaveLen(4))
 		Expect(results[0].Labels).To(HaveKeyWithValue("app", "svc"))
+	})
+
+	It("rebuilds remote catalog rows from an S3 listing on a fresh catalog", func() {
+		dir := GinkgoT().TempDir()
+		remoteDir := GinkgoT().TempDir()
+
+		// Count HTTP reads so we can prove the rebuild opens no segment.
+		var requests atomic.Int64
+		server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			requests.Add(1)
+			http.FileServer(http.Dir(remoteDir)).ServeHTTP(w, r)
+		}))
+		DeferCleanup(server.Close)
+
+		store := &fakeStore{remoteDir: remoteDir, baseURL: server.URL}
+		base := int64(1_700_000_000_000_000_000)
+
+		// Produce a local segment and rotate it to remote, then sweep the local copy.
+		catalog, err := managers.OpenCatalog(dir)
+		Expect(err).NotTo(HaveOccurred())
+
+		buckets, err := loge.NewBuckets(context.Background(), 1, 1, dir, false)
+		Expect(err).NotTo(HaveOccurred())
+
+		for i := range 4 {
+			Expect(buckets.Append(loge.Payload{
+				Streams: loge.Streams{
+					loge.Entry{
+						Stream: loge.Stream{"app": "svc"},
+						Values: loge.Values{loge.Value{strconv.FormatInt(base+int64(i), 10), fmt.Sprintf("line %d", i)}},
+					},
+				},
+			})).To(Succeed())
+		}
+
+		Eventually(func() int {
+			matches, _ := filepath.Glob(filepath.Join(dir, "bucket-*.sqlite.zst"))
+
+			return len(matches)
+		}, "5s").Should(Equal(4))
+		Expect(buckets.Close()).To(Succeed())
+
+		_, err = loge.NewCompactor(dir, 2, 128, time.Hour, loge.WithCompactorCatalog(catalog)).Compact()
+		Expect(err).NotTo(HaveOccurred())
+
+		uploader := loge.NewUploader(dir, catalog, store,
+			loge.WithRotateAge(0), loge.WithRotateGrace(0), loge.WithUploadPrefix("loge"))
+		rotated, err := uploader.Rotate(context.Background())
+		Expect(err).NotTo(HaveOccurred())
+		Expect(rotated).To(Equal(1))
+		Expect(uploader.Sweep()).To(Succeed())
+
+		original, err := catalog.List()
+		Expect(err).NotTo(HaveOccurred())
+		Expect(original).To(HaveLen(1))
+
+		// Lose the catalog entirely (fresh node / lost disk).
+		Expect(catalog.Close()).To(Succeed())
+		for _, suffix := range []string{"", "-wal", "-shm"} {
+			_ = os.Remove(filepath.Join(dir, "catalog.sqlite"+suffix))
+		}
+
+		// A fresh catalog: local reconcile finds nothing (the local copy was swept).
+		fresh, err := managers.OpenCatalog(dir)
+		Expect(err).NotTo(HaveOccurred())
+		DeferCleanup(func() { _ = fresh.Close() })
+		Expect(fresh.Reconcile(dir)).To(Succeed())
+
+		empty, err := fresh.List()
+		Expect(err).NotTo(HaveOccurred())
+		Expect(empty).To(BeEmpty())
+
+		// Rebuilding from the S3 listing rediscovers the remote segment, parsing
+		// its bounds from the filename WITHOUT opening it over HTTP.
+		before := requests.Load()
+		rebuilt := loge.NewUploader(dir, fresh, store, loge.WithUploadPrefix("loge"))
+		added, err := rebuilt.ReconcileRemote(context.Background())
+		Expect(err).NotTo(HaveOccurred())
+		Expect(added).To(Equal(1))
+		Expect(requests.Load()).To(Equal(before), "reconcile must not open any segment over HTTP")
+
+		segments, err := fresh.List()
+		Expect(err).NotTo(HaveOccurred())
+		Expect(segments).To(HaveLen(1))
+		Expect(segments[0].Location).To(Equal(managers.LocationRemote))
+		Expect(segments[0].ID).To(Equal(original[0].ID))
+		Expect(segments[0].MinTimestamp).To(Equal(base))
+		Expect(segments[0].MaxTimestamp).To(Equal(base + 3))
+
+		// The rebuilt catalog can serve the segment back over HTTP.
+		manager, err := managers.NewLocal(dir, managers.WithCatalog(fresh))
+		Expect(err).NotTo(HaveOccurred())
+		DeferCleanup(func() { _ = manager.Close() })
+
+		results, err := manager.Query(context.Background(), managers.QueryRequest{})
+		Expect(err).NotTo(HaveOccurred())
+		Expect(results).To(HaveLen(4))
 	})
 })

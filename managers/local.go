@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"log/slog"
 	"os"
+	"path/filepath"
 	"regexp"
 	"sort"
 	"strings"
@@ -143,7 +144,25 @@ func (m *Local) watcherSources() []querySource {
 // unbounded): local flush files from the watcher plus catalog segments pruned
 // to the window (resolved to a local copy when present, else their remote URL).
 func (m *Local) sources(start, end int64) ([]querySource, error) {
-	sources := m.watcherSources()
+	var sources []querySource
+
+	// Local flush files are tracked by the watcher. Prune them by their
+	// filename-encoded bounds when possible so non-overlapping files are never
+	// opened; legacy names (no parseable bounds) fall through to the open-based
+	// fileOverlaps check in Query.
+	_ = m.watcher.Iterate(func(filename string) error {
+		if start != 0 || end != 0 {
+			if bounds, ok := ParseBounds(filepath.Base(filename)); ok {
+				if (start != 0 && bounds.Max < start) || (end != 0 && bounds.Min > end) {
+					return nil
+				}
+			}
+		}
+
+		sources = append(sources, querySource{id: filename, dsn: filename})
+
+		return nil
+	})
 
 	if m.catalog != nil {
 		segments, err := m.catalog.Overlapping(start, end)

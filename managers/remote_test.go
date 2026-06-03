@@ -151,7 +151,7 @@ var _ = Describe("Query over remote (HTTP) segments", func() {
 		}
 	})
 
-	It("matches a multi-word keyword via first-word MATCH narrowed by the LIKE refine", func() {
+	It("matches a multi-word keyword over a remote segment with a sequential LIKE", func() {
 		early := int64(1_700_000_000_000_000_000)
 		produceRemoteSegment(early, 5, "web") // lines "web line 0".."web line 4"
 
@@ -159,17 +159,17 @@ var _ = Describe("Query over remote (HTTP) segments", func() {
 		Expect(err).NotTo(HaveOccurred())
 		DeferCleanup(func() { _ = manager.Close() })
 
-		// Remote path MATCHes only the first word ("web", which over-matches all 5
-		// lines), then the full-keyword LIKE refines to the one exact line.
+		// Remote segments use a sequential LIKE (no FTS) — the index is a
+		// pessimization over HTTP. The keyword's trigrams are present, so the
+		// catalog filter does not prune, and the LIKE finds the one exact line.
 		hits, err := manager.Query(context.Background(), managers.QueryRequest{Line: "web line 3"})
 		Expect(err).NotTo(HaveOccurred())
 		Expect(hits).To(HaveLen(1))
 		Expect(hits[0].Line).To(Equal("web line 3"))
 		Expect(requests.Load()).To(BeNumerically(">", 0))
 
-		// First word present but full phrase absent: the LIKE must reject every
-		// MATCH candidate, so the result is empty (correctness rests on the LIKE).
-		none, err := manager.Query(context.Background(), managers.QueryRequest{Line: "web line 99"})
+		// A phrase that does not occur returns nothing.
+		none, err := manager.Query(context.Background(), managers.QueryRequest{Line: "web line 33"})
 		Expect(err).NotTo(HaveOccurred())
 		Expect(none).To(BeEmpty())
 	})

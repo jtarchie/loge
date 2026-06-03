@@ -5,62 +5,34 @@ import (
 	"testing"
 )
 
-func TestFirstIndexableWord(t *testing.T) {
-	t.Parallel()
-
-	cases := []struct {
-		line string
-		want string
-		ok   bool
-	}{
-		{"connection refused", "connection", true}, // multi-word → first word
-		{"/checkout", "/checkout", true},           // single token unchanged
-		{"  the  quick", "the", true},              // leading/extra spaces
-		{"a bc def", "def", true},                  // skips tokens shorter than 3 runes
-		{"ab cd", "", false},                       // no token long enough
-		{"", "", false},                            // empty
-	}
-
-	for _, tc := range cases {
-		got, ok := firstIndexableWord(tc.line)
-		if got != tc.want || ok != tc.ok {
-			t.Errorf("firstIndexableWord(%q) = (%q, %v), want (%q, %v)", tc.line, got, ok, tc.want, tc.ok)
-		}
-	}
-}
-
-func TestBuildQueryMatchTermPerTier(t *testing.T) {
+func TestBuildQueryLineFilterPerTier(t *testing.T) {
 	t.Parallel()
 
 	req := QueryRequest{Line: "connection refused"}
 
-	localSQL, _ := buildQuery(req, 100, true, false)
-	if !strings.Contains(localSQL, "line_search MATCH") {
-		t.Fatalf("local query should keep the trigram MATCH: %s", localSQL)
+	// Local segments (useLineIndex=true): trigram MATCH on the full keyword plus
+	// the LIKE exact filter.
+	indexed, indexedArgs := buildQuery(req, 100, true)
+	if !strings.Contains(indexed, "line_search MATCH") {
+		t.Fatalf("indexed query should MATCH: %s", indexed)
 	}
 
-	remoteSQL, remoteArgs := buildQuery(req, 100, true, true)
-	if !strings.Contains(remoteSQL, "line_search MATCH") {
-		t.Fatalf("remote query should still MATCH (minimally): %s", remoteSQL)
+	if !containsArg(indexedArgs, `"connection refused"`) {
+		t.Errorf("MATCH term should be the full keyword, args=%v", indexedArgs)
 	}
 
-	// The remote MATCH term is the first word; the LIKE is the full keyword.
-	if !containsArg(remoteArgs, `"connection"`) {
-		t.Errorf("remote MATCH term should be the first word, args=%v", remoteArgs)
+	if !strings.Contains(indexed, "s.line LIKE") {
+		t.Errorf("indexed query must also LIKE: %s", indexed)
 	}
 
-	if !containsArg(remoteArgs, "%connection refused%") {
-		t.Errorf("LIKE must still use the full keyword, args=%v", remoteArgs)
+	// Remote segments (useLineIndex=false): a sequential LIKE only — no FTS.
+	likeOnly, _ := buildQuery(req, 100, false)
+	if strings.Contains(likeOnly, "line_search MATCH") {
+		t.Errorf("LIKE-only query must not MATCH: %s", likeOnly)
 	}
 
-	// A keyword with no token >= 3 runes drops the MATCH entirely on remote.
-	noMatchSQL, _ := buildQuery(QueryRequest{Line: "ab cd"}, 100, true, true)
-	if strings.Contains(noMatchSQL, "line_search MATCH") {
-		t.Errorf("remote query with no indexable word should skip MATCH: %s", noMatchSQL)
-	}
-
-	if !strings.Contains(noMatchSQL, "s.line LIKE") {
-		t.Errorf("remote query must still apply the LIKE filter: %s", noMatchSQL)
+	if !strings.Contains(likeOnly, "s.line LIKE") {
+		t.Errorf("LIKE-only query must still LIKE: %s", likeOnly)
 	}
 }
 

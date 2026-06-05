@@ -20,8 +20,9 @@ import (
 	"github.com/labstack/echo/v5/middleware"
 )
 
-// cacheVFSName is a sqlite VFS registered once with an HTTP read cache, used to
-// open (local and remote) segments. The cache is a no-op for local files.
+// cacheVFSName is a sqlite VFS registered once with a decoded-frame cache, used
+// to open (local and remote) segments. The cache holds decoded zstd frames, so
+// it avoids re-decoding (and, for remote segments, re-fetching) on repeated reads.
 const cacheVFSName = "zstdcache"
 
 var (
@@ -29,11 +30,10 @@ var (
 	cacheVFSErr  error
 )
 
-func ensureCacheVFS(cacheBytes int64, pageBytes int) (string, error) {
+func ensureCacheVFS(frames int) (string, error) {
 	cacheVFSOnce.Do(func() {
 		cacheVFSErr = sqlitezstd.Register(cacheVFSName,
-			sqlitezstd.WithHTTPCacheSize(cacheBytes),
-			sqlitezstd.WithHTTPPageSize(pageBytes),
+			sqlitezstd.WithFrameCacheSize(frames),
 			sqlitezstd.WithLogger(slog.Default()),
 		)
 	})
@@ -95,8 +95,7 @@ type ServeCmd struct {
 	S3RotateAge      time.Duration `name:"s3-rotate-age"        default:"1h"    help:"rotate local segments older than this to S3"`
 	S3RotateInterval time.Duration `name:"s3-rotate-interval"   default:"1m"    help:"how often the rotation loop runs"`
 	S3RotateGrace    time.Duration `name:"s3-rotate-grace"      default:"1m"    help:"keep a rotated segment's local copy this long before deleting it"`
-	S3HTTPCacheBytes int64         `name:"s3-http-cache-bytes"  default:"33554432" help:"per-file in-memory HTTP read cache for remote segments (bytes; 0 disables)"`
-	S3HTTPPageBytes  int           `name:"s3-http-page-bytes"   default:"0"     help:"coalescing page size for the HTTP read cache (0 uses the default)"`
+	S3FrameCacheSize int           `name:"s3-frame-cache-size"  default:"512"   help:"per-file decoded zstd frames to cache for segment reads (each frame is ~64 KiB)"`
 }
 
 func (c *ServeCmd) Run() error {
@@ -105,8 +104,8 @@ func (c *ServeCmd) Run() error {
 		return fmt.Errorf("could not create directory: %w", err)
 	}
 
-	// Register the HTTP-caching VFS used to open segments (local and remote).
-	vfsName, err := ensureCacheVFS(c.S3HTTPCacheBytes, c.S3HTTPPageBytes)
+	// Register the frame-caching VFS used to open segments (local and remote).
+	vfsName, err := ensureCacheVFS(c.S3FrameCacheSize)
 	if err != nil {
 		return fmt.Errorf("could not register cache vfs: %w", err)
 	}

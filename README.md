@@ -36,7 +36,7 @@ POST /api/v1/push ──► bucket workers batch ──► flush to <bucket>.sql
 - **S3 tiering** (optional): segments older than `--s3-rotate-age` are rotated to
   S3 and the catalog is flipped to point at their public URL; recent segments stay
   local. Queries read cold (S3) segments back over HTTP via the seekable-zstd VFS,
-  fetching only the bytes an indexed query needs (coalesced and cached). Pruning
+  fetching only the bytes an indexed query needs (with decoded frames cached). Pruning
   means most queries touch S3 zero times; an S3 outage degrades a query to its
   local results rather than failing. Ingest durability is unaffected — S3 only
   ever receives already-durable, compacted segments.
@@ -151,7 +151,7 @@ The server is the default command, so `loge` and `loge serve` are equivalent.
 | `--s3-rotate-age` | `1h` | rotate local segments older than this to S3 |
 | `--s3-rotate-interval` | `1m` | how often the rotation loop runs |
 | `--s3-rotate-grace` | `1m` | keep a rotated segment's local copy this long before deleting it |
-| `--s3-http-cache-bytes` | `32 MiB` | per-file in-memory HTTP read cache for remote segments (`0` disables) |
+| `--s3-frame-cache-size` | `512` | per-file decoded zstd frames cached for segment reads (each frame is ~64 KiB) |
 
 S3 reads are **public, path-based** HTTP GETs (auth must not ride in the URL query
 string — `go-sqlite3` strips it), so the bucket/prefix must be readable without

@@ -2,6 +2,7 @@ package loge_test
 
 import (
 	"context"
+	"database/sql"
 	"fmt"
 	"io/fs"
 	"net/http"
@@ -89,6 +90,31 @@ func (s *fakeStore) List(_ context.Context, prefix string) ([]string, error) {
 	return keys, nil
 }
 
+// tableExists reports whether a compressed segment (.sqlite.zst, opened via the
+// read-only zstd VFS) contains an object (table or index) with the given name.
+func tableExists(zstPath, name string) bool {
+	db, err := sql.Open("sqlite3", zstPath+"?vfs=zstd")
+	Expect(err).NotTo(HaveOccurred())
+	defer func() { _ = db.Close() }()
+
+	var count int
+	Expect(db.QueryRow(`SELECT COUNT(*) FROM sqlite_master WHERE name = ?`, name).Scan(&count)).To(Succeed())
+
+	return count > 0
+}
+
+// rowCount returns the number of rows in a table of a compressed segment.
+func rowCount(zstPath, table string) int {
+	db, err := sql.Open("sqlite3", zstPath+"?vfs=zstd")
+	Expect(err).NotTo(HaveOccurred())
+	defer func() { _ = db.Close() }()
+
+	var count int
+	Expect(db.QueryRow(`SELECT COUNT(*) FROM ` + table).Scan(&count)).To(Succeed())
+
+	return count
+}
+
 var _ = Describe("Uploader", func() {
 	It("rotates a segment to remote, sweeps the local copy, and serves reads from remote", func() {
 		dir := GinkgoT().TempDir()
@@ -166,6 +192,86 @@ var _ = Describe("Uploader", func() {
 		Expect(err).NotTo(HaveOccurred())
 		Expect(results).To(HaveLen(4))
 		Expect(results[0].Labels).To(HaveKeyWithValue("app", "svc"))
+	})
+
+	It("uploads an FTS-stripped cold copy that still serves keyword (LIKE) queries", func() {
+		dir := GinkgoT().TempDir()
+		remoteDir := GinkgoT().TempDir()
+
+		catalog, err := managers.OpenCatalog(dir)
+		Expect(err).NotTo(HaveOccurred())
+		DeferCleanup(func() { _ = catalog.Close() })
+
+		server := httptest.NewServer(http.FileServer(http.Dir(remoteDir)))
+		DeferCleanup(server.Close)
+
+		buckets, err := loge.NewBuckets(context.Background(), 1, 1, dir, false)
+		Expect(err).NotTo(HaveOccurred())
+
+		base := int64(1_700_000_000_000_000_000)
+		for i := range 4 {
+			buckets.Append(loge.Payload{
+				Streams: loge.Streams{
+					loge.Entry{
+						Stream: loge.Stream{"app": "svc"},
+						Values: loge.Values{loge.Value{strconv.FormatInt(base+int64(i), 10), fmt.Sprintf("line %d alpha", i)}},
+					},
+				},
+			})
+		}
+
+		Eventually(func() int {
+			matches, _ := filepath.Glob(filepath.Join(dir, "bucket-*.sqlite.zst"))
+
+			return len(matches)
+		}, "5s").Should(Equal(4))
+		Expect(buckets.Close()).To(Succeed())
+
+		_, err = loge.NewCompactor(dir, 2, 128, time.Hour, loge.WithCompactorCatalog(catalog)).Compact()
+		Expect(err).NotTo(HaveOccurred())
+
+		segments, err := catalog.List()
+		Expect(err).NotTo(HaveOccurred())
+		Expect(segments).To(HaveLen(1))
+		segmentID := segments[0].ID
+
+		// The local (hot) segment keeps its FTS index.
+		localPath := segments[0].LocalPath
+		Expect(tableExists(localPath, "line_search")).To(BeTrue(), "local segment keeps FTS")
+
+		store := &fakeStore{remoteDir: remoteDir, baseURL: server.URL}
+		uploader := loge.NewUploader(dir, catalog, store,
+			loge.WithRotateAge(0), loge.WithRotateGrace(0), loge.WithUploadPrefix("loge"))
+
+		rotated, err := uploader.Rotate(context.Background())
+		Expect(err).NotTo(HaveOccurred())
+		Expect(rotated).To(Equal(1))
+
+		// The uploaded cold copy has NO FTS index, but keeps the data, the
+		// timestamp index, and the metadata bounds.
+		remotePath := filepath.Join(remoteDir, "loge", segmentID)
+		Expect(remotePath).To(BeAnExistingFile())
+		Expect(tableExists(remotePath, "line_search")).To(BeFalse(), "cold copy must be FTS-stripped")
+		Expect(tableExists(remotePath, "idx_streams_timestamp")).To(BeTrue(), "cold copy keeps the timestamp index")
+		Expect(rowCount(remotePath, "streams")).To(Equal(4))
+		Expect(rowCount(remotePath, "labels")).To(Equal(4))
+
+		// No temp strip artifacts are left behind in the working directory.
+		leftovers, _ := filepath.Glob(filepath.Join(dir, "*.strip*"))
+		Expect(leftovers).To(BeEmpty())
+
+		Expect(uploader.Sweep()).To(Succeed())
+
+		// A keyword query now resolves over HTTP against the stripped copy, using
+		// LIKE only (no FTS) — and still returns the right line.
+		manager, err := managers.NewLocal(dir, managers.WithCatalog(catalog))
+		Expect(err).NotTo(HaveOccurred())
+		DeferCleanup(func() { _ = manager.Close() })
+
+		results, err := manager.Query(context.Background(), managers.QueryRequest{Line: "line 2"})
+		Expect(err).NotTo(HaveOccurred())
+		Expect(results).To(HaveLen(1))
+		Expect(results[0].Line).To(Equal("line 2 alpha"))
 	})
 
 	It("rebuilds remote catalog rows from an S3 listing on a fresh catalog", func() {

@@ -104,21 +104,40 @@ type streamEntry struct {
 	labelID   int64
 }
 
-// encoderPool holds reusable zstd encoders to avoid allocation overhead
-var encoderPool = sync.Pool{
-	New: func() any {
-		enc, err := zstd.NewWriter(nil,
-			zstd.WithEncoderLevel(zstd.SpeedBetterCompression),
-			zstd.WithEncoderConcurrency(1),
-		)
-		if err != nil {
-			return nil
-		}
-		return enc
-	},
+// betterEncoderPool holds reusable zstd encoders at SpeedBetterCompression,
+// used for short-lived flush files on the latency-sensitive ingest path.
+var betterEncoderPool = newEncoderPool(zstd.SpeedBetterCompression)
+
+// bestEncoderPool holds reusable zstd encoders at SpeedBestCompression, used for
+// compacted segments. Segments are built on the background compactor (which has
+// CPU headroom) and are the long-lived, durable, S3-rotated files, so spending
+// more CPU for a better ratio pays off in stored bytes.
+var bestEncoderPool = newEncoderPool(zstd.SpeedBestCompression)
+
+func newEncoderPool(level zstd.EncoderLevel) *sync.Pool {
+	return &sync.Pool{
+		New: func() any {
+			enc, err := zstd.NewWriter(nil,
+				zstd.WithEncoderLevel(level),
+				zstd.WithEncoderConcurrency(1),
+			)
+			if err != nil {
+				return nil
+			}
+			return enc
+		},
+	}
 }
 
-// copyBufferPool holds reusable buffers for io.CopyBuffer
+// copyBufferPool holds reusable buffers for io.CopyBuffer.
+//
+// Note: this buffer size does NOT control the seekable zstd frame size, and so
+// does not affect the compression ratio. compress() copies an *os.File into the
+// seekable writer, and *os.File implements io.WriterTo, so io.CopyBuffer takes
+// the WriteTo fast-path and ignores this buffer; os.File.WriteTo frames at ~32
+// KiB, which the size harness found is already at the knee (bigger frames buy
+// ~1% for much worse remote read amplification). The buffer only bounds copy
+// memory. See sizebench_internal_test.go (TestFrameSizeReal).
 const copyBufferSize = 8 * 1024 // 8KB buffer - smaller to reduce memory
 
 var copyBufferPool = sync.Pool{
@@ -615,7 +634,20 @@ func batchInsertStreams(tx *sql.Tx, streams []streamEntry) error {
 	return nil
 }
 
+// compress writes filename as a seekable-zstd archive (filename+".zst") using
+// the flush-tier encoder (SpeedBetterCompression) and removes the source.
 func compress(filename string) error {
+	return compressWithPool(filename, betterEncoderPool)
+}
+
+// compressSegment is compress for compacted segments: it uses the
+// SpeedBestCompression encoder, trading background CPU for a smaller durable
+// (and S3-rotated) file.
+func compressSegment(filename string) error {
+	return compressWithPool(filename, bestEncoderPool)
+}
+
+func compressWithPool(filename string, pool *sync.Pool) error {
 	partial := filename + ".zst.partial"
 	final := filename + ".zst"
 
@@ -644,12 +676,12 @@ func compress(filename string) error {
 	}()
 
 	// Get encoder from pool
-	encoderIface := encoderPool.Get()
+	encoderIface := pool.Get()
 	if encoderIface == nil {
 		return fmt.Errorf("could not get encoder from pool")
 	}
 	encoder := encoderIface.(*zstd.Encoder)
-	defer encoderPool.Put(encoder)
+	defer pool.Put(encoder)
 
 	// Reset encoder for reuse
 	encoder.Reset(nil)
@@ -659,7 +691,7 @@ func compress(filename string) error {
 		return fmt.Errorf("could not load writer: %w", err)
 	}
 
-	// Use pooled buffer for copying
+	// Use pooled buffer for copying.
 	bufPtr := copyBufferPool.Get().(*[]byte)
 	defer copyBufferPool.Put(bufPtr)
 

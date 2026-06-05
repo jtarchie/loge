@@ -186,6 +186,9 @@ func (c *Compactor) merge(sources []string) error {
 		_ = client.Close()
 	}()
 
+	// The default 4 KiB page size compresses best here: the size harness found
+	// larger pages slightly increase the compressed segment (more b-tree/FTS slack
+	// per page), so we do not override it.
 	_, err = client.Exec(`
 		PRAGMA journal_mode = OFF;
 		PRAGMA synchronous = OFF;
@@ -251,10 +254,12 @@ func (c *Compactor) merge(sources []string) error {
 		return fmt.Errorf("could not write segment metadata: %w", err)
 	}
 
-	// Build the heavy indexes once for the whole segment.
+	// Build the heavy indexes once for the whole segment. idx_streams_timestamp
+	// backs the time-range filter and the ORDER BY timestamp DESC LIMIT; no read
+	// path filters streams by label_id (the query drives from streams and reaches
+	// labels by primary key), so an index on label_id would be pure dead weight.
 	if _, err := transaction.Exec(`
 		CREATE INDEX idx_streams_timestamp ON streams(timestamp);
-		CREATE INDEX idx_streams_label_id ON streams(label_id);
 		CREATE VIRTUAL TABLE line_search USING fts5(line, content='', columnsize=0, tokenize="trigram");
 		INSERT INTO line_search(rowid, line) SELECT id, line FROM streams;
 	`); err != nil {
@@ -274,8 +279,9 @@ func (c *Compactor) merge(sources []string) error {
 	}
 	finalized = true
 
-	// compress() turns base into base+".zst" and removes base.
-	if err := compress(base); err != nil {
+	// compressSegment() turns base into base+".zst" and removes base, using the
+	// higher-ratio segment encoder.
+	if err := compressSegment(base); err != nil {
 		return fmt.Errorf("could not compress segment: %w", err)
 	}
 

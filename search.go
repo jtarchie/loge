@@ -30,6 +30,14 @@ type SearchCmd struct {
 	Limit  int           `default:"100"  help:"max results (server caps at 5000)"`
 	Output string        `default:"text" enum:"text,json" help:"output format"`
 
+	// Client-side ("--local") search: instead of having the server scan
+	// everything, fetch a plan and scan the cold (S3) segments on this machine,
+	// moving the heavy historical scan off the server.
+	Local          bool   `help:"scan the cold (S3) segments on this machine; the server only scans its hot tier"`
+	APIKey         string `name:"api-key" env:"LOGE_API_KEY" help:"bearer token for the server's client-side search plan endpoint"`
+	Concurrency    int    `name:"concurrency"       default:"8"   help:"max cold segments to scan in parallel in --local mode"`
+	FrameCacheSize int    `name:"frame-cache-size"  default:"512" help:"decoded zstd frames cached per segment in --local mode"`
+
 	// Out is where results are written; nil defaults to os.Stdout. Excluded from
 	// kong flag parsing so tests can capture output.
 	Out io.Writer `kong:"-"`
@@ -46,13 +54,24 @@ func (c *SearchCmd) Run() error {
 		return err
 	}
 
-	response, err := c.query(context.Background(), managers.QueryRequest{
+	request := managers.QueryRequest{
 		Start:    start,
 		End:      end,
 		Matchers: matchers,
 		Line:     line,
 		Limit:    c.Limit,
-	})
+	}
+
+	ctx := context.Background()
+
+	var response QueryResponse
+
+	if c.Local {
+		response, err = c.runLocal(ctx, request)
+	} else {
+		response, err = c.query(ctx, request)
+	}
+
 	if err != nil {
 		return err
 	}

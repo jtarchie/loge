@@ -32,6 +32,7 @@ type Local struct {
 	catalog     *Catalog
 	vfsName     string
 	concurrency int
+	noWatcher   bool
 	lineSearch  sync.Map // dsn -> bool: whether the source has the line_search index
 }
 
@@ -66,6 +67,17 @@ func WithQueryConcurrency(n int) Option {
 	}
 }
 
+// WithoutWatcher builds a manager that tracks no local files: it neither starts
+// a filesystem watcher nor consults a catalog. Such a manager only serves
+// QuerySources (an explicit list of sources), which is what the client-side
+// search path needs — it scans the cold segments the server's plan names and
+// has no local segment directory of its own.
+func WithoutWatcher() Option {
+	return func(l *Local) {
+		l.noWatcher = true
+	}
+}
+
 func NewLocal(outputPath string, opts ...Option) (*Local, error) {
 	local := &Local{
 		outputDir:   outputPath,
@@ -77,19 +89,23 @@ func NewLocal(outputPath string, opts ...Option) (*Local, error) {
 		opt(local)
 	}
 
-	// With a catalog, segments are tracked there and the watcher only needs the
-	// ephemeral local flush files; without one, the watcher tracks everything.
-	pattern := `\.sqlite\.zst$`
-	if local.catalog != nil {
-		pattern = `bucket-.*\.sqlite\.zst$`
-	}
+	// A client-side manager (WithoutWatcher) tracks no local files and only
+	// serves QuerySources, so it skips the watcher entirely.
+	if !local.noWatcher {
+		// With a catalog, segments are tracked there and the watcher only needs the
+		// ephemeral local flush files; without one, the watcher tracks everything.
+		pattern := `\.sqlite\.zst$`
+		if local.catalog != nil {
+			pattern = `bucket-.*\.sqlite\.zst$`
+		}
 
-	watcher, err := filewatcher.New(outputPath, regexp.MustCompile(pattern))
-	if err != nil {
-		return nil, fmt.Errorf("could not start watcher: %w", err)
-	}
+		watcher, err := filewatcher.New(outputPath, regexp.MustCompile(pattern))
+		if err != nil {
+			return nil, fmt.Errorf("could not start watcher: %w", err)
+		}
 
-	local.watcher = watcher
+		local.watcher = watcher
+	}
 
 	cache, err := lru.NewWithEvict[string, *sql.DB](defaultCachedDBs, func(dsn string, client *sql.DB) {
 		_ = client.Close()
@@ -106,6 +122,10 @@ func NewLocal(outputPath string, opts ...Option) (*Local, error) {
 
 func (m *Local) Close() error {
 	defer m.cache.Purge()
+
+	if m.watcher == nil {
+		return nil
+	}
 
 	err := m.watcher.Close()
 	if err != nil {
@@ -129,6 +149,10 @@ type querySource struct {
 
 // watcherSources returns the local files the watcher is tracking.
 func (m *Local) watcherSources() []querySource {
+	if m.watcher == nil {
+		return nil
+	}
+
 	var sources []querySource
 
 	_ = m.watcher.Iterate(func(filename string) error {
@@ -144,27 +168,30 @@ func (m *Local) watcherSources() []querySource {
 // unbounded): local flush files from the watcher plus catalog segments pruned
 // to the window (resolved to a local copy when present, else their remote URL).
 // When line is set, catalog segments whose trigram filter proves they cannot
-// contain it are pruned too — with no file/S3 read.
-func (m *Local) sources(start, end int64, line string) ([]querySource, error) {
+// contain it are pruned too — with no file/S3 read. When localOnly is set,
+// remote (S3) catalog segments are skipped so only the hot tier is scanned.
+func (m *Local) sources(start, end int64, line string, localOnly bool) ([]querySource, error) {
 	var sources []querySource
 
 	// Local flush files are tracked by the watcher. Prune them by their
 	// filename-encoded bounds when possible so non-overlapping files are never
 	// opened; legacy names (no parseable bounds) fall through to the open-based
 	// fileOverlaps check in Query.
-	_ = m.watcher.Iterate(func(filename string) error {
-		if start != 0 || end != 0 {
-			if bounds, ok := ParseBounds(filepath.Base(filename)); ok {
-				if (start != 0 && bounds.Max < start) || (end != 0 && bounds.Min > end) {
-					return nil
+	if m.watcher != nil {
+		_ = m.watcher.Iterate(func(filename string) error {
+			if start != 0 || end != 0 {
+				if bounds, ok := ParseBounds(filepath.Base(filename)); ok {
+					if (start != 0 && bounds.Max < start) || (end != 0 && bounds.Min > end) {
+						return nil
+					}
 				}
 			}
-		}
 
-		sources = append(sources, querySource{id: filename, dsn: filename})
+			sources = append(sources, querySource{id: filename, dsn: filename})
 
-		return nil
-	})
+			return nil
+		})
+	}
 
 	if m.catalog != nil {
 		segments, err := m.catalog.Overlapping(start, end)
@@ -173,6 +200,11 @@ func (m *Local) sources(start, end int64, line string) ([]querySource, error) {
 		}
 
 		for _, segment := range segments {
+			// Hot-only scan: leave remote segments to the client-side cold path.
+			if localOnly && segment.Location == LocationRemote {
+				continue
+			}
+
 			// Skip segments whose trigram filter proves they cannot contain the
 			// keyword — zero file/S3 reads. Segments without a filter (older, or
 			// rebuilt from an S3 listing) fall through and are scanned.

@@ -36,6 +36,11 @@ type QueryRequest struct {
 	Matchers []Matcher `json:"matchers"`
 	Line     string    `json:"line"`
 	Limit    int       `json:"limit"`
+	// LocalOnly restricts the scan to hot sources — the watcher's flush files and
+	// catalog segments still living locally — skipping remote (S3) segments. It
+	// is used by the client-side search path, where the server scans only the hot
+	// tier and the CLI scans the cold tier itself.
+	LocalOnly bool `json:"local_only"`
 }
 
 // QueryEntry is a single matching log line with its stream's labels.
@@ -68,11 +73,51 @@ func (m *Local) Query(ctx context.Context, req QueryRequest) ([]QueryEntry, erro
 		return nil, err
 	}
 
-	sources, err := m.sources(req.Start, req.End, req.Line)
+	sources, err := m.sources(req.Start, req.End, req.Line, req.LocalOnly)
 	if err != nil {
 		return nil, err
 	}
 
+	return m.queryOver(ctx, req, sources, limit, regexMatchers), nil
+}
+
+// QuerySources runs req against an explicit set of already-pruned segments given
+// by their DSNs (local paths or HTTP(S) URLs), reusing the same SQL/regex
+// pipeline as Query. Unlike Query it consults neither the catalog nor the
+// watcher: the caller supplies the exact sources to scan (e.g. a CLI handed a
+// server-built plan of presigned S3 segment URLs). Each DSN is treated as
+// pre-pruned — already known to overlap the window and possibly contain the
+// keyword — so no per-file time-bounds or trigram check is repeated.
+func (m *Local) QuerySources(ctx context.Context, req QueryRequest, dsns []string) ([]QueryEntry, error) {
+	limit := req.Limit
+	if limit <= 0 || limit > maxQueryLimit {
+		limit = defaultQueryLimit
+	}
+
+	regexMatchers, err := compileRegexMatchers(req.Matchers)
+	if err != nil {
+		return nil, err
+	}
+
+	sources := make([]querySource, 0, len(dsns))
+	for _, dsn := range dsns {
+		sources = append(sources, querySource{id: dsn, dsn: dsn, prePruned: true})
+	}
+
+	return m.queryOver(ctx, req, sources, limit, regexMatchers), nil
+}
+
+// queryOver scans every source for rows matching req (each source capped to
+// limit), applies the Go-side regex matchers, then merges the rows newest-first
+// and caps the merged set to limit. A failure on one source degrades the result
+// to the sources that succeeded rather than failing the whole query.
+func (m *Local) queryOver(
+	ctx context.Context,
+	req QueryRequest,
+	sources []querySource,
+	limit int,
+	regexMatchers []regexMatcher,
+) []QueryEntry {
 	var (
 		mu      sync.Mutex
 		results []QueryEntry
@@ -148,7 +193,7 @@ func (m *Local) Query(ctx context.Context, req QueryRequest) ([]QueryEntry, erro
 		results = results[:limit]
 	}
 
-	return results, nil
+	return results
 }
 
 // hasLineSearch reports whether a file has the trigram line_search index,

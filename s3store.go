@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"os"
 	"strings"
+	"time"
 
 	"github.com/aws/aws-sdk-go-v2/aws"
 	awsconfig "github.com/aws/aws-sdk-go-v2/config"
@@ -116,6 +117,26 @@ func (s *S3Store) Put(ctx context.Context, key, localPath string) (string, error
 // ReadURL returns the public, path-based HTTP URL a key is read back from.
 func (s *S3Store) ReadURL(key string) string {
 	return s.readURLBase + "/" + key
+}
+
+// Presign returns a short-lived presigned GET URL for key, valid for expiry.
+// The URL carries the SigV4 signature in its query string, so a client can read
+// a private object directly from S3 without AWS credentials. It is signed
+// against the real S3 endpoint/bucket (not ReadURLBase/CDN), so it works for
+// private buckets, and because Range is not a signed header the same URL serves
+// every range read of a segment.
+func (s *S3Store) Presign(ctx context.Context, key string, expiry time.Duration) (string, error) {
+	presign := s3.NewPresignClient(s.client)
+
+	request, err := presign.PresignGetObject(ctx, &s3.GetObjectInput{
+		Bucket: aws.String(s.bucket),
+		Key:    aws.String(key),
+	}, s3.WithPresignExpires(expiry))
+	if err != nil {
+		return "", fmt.Errorf("could not presign segment %q: %w", key, err)
+	}
+
+	return request.URL, nil
 }
 
 // List returns every object key stored under prefix, paginating through the

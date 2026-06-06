@@ -2,12 +2,15 @@ package loge
 
 import (
 	"context"
+	"crypto/subtle"
 	"fmt"
 	"log/slog"
 	"net/http"
 	"os"
 	"os/signal"
+	"path"
 	"path/filepath"
+	"strings"
 	"syscall"
 	"time"
 
@@ -59,6 +62,49 @@ type StatsResponse struct {
 	MaxTimestamp   int64  `json:"max_timestamp"`
 }
 
+// PlanSegment is one cold-tier (S3) segment in a client-side search plan: its
+// catalog ID and a short-lived presigned URL the client reads it from directly.
+type PlanSegment struct {
+	ID  string `json:"id"`
+	URL string `json:"url"`
+}
+
+// PlanResponse answers a client-side search plan request. The server scans the
+// hot tier itself (Hot) and hands the client the pruned, presigned cold segments
+// (Segments) to scan on its own machine; ExpiresAt is when the presigned URLs
+// stop working.
+type PlanResponse struct {
+	Status    string                `json:"status"`
+	Hot       []managers.QueryEntry `json:"hot"`
+	Segments  []PlanSegment         `json:"segments"`
+	ExpiresAt int64                 `json:"expires_at"`
+}
+
+// bearerAuth gates a route with a shared API key presented as a bearer token.
+// When apiKey is empty the route is left open, matching the other endpoints'
+// trusted-network posture.
+func bearerAuth(apiKey string) echo.MiddlewareFunc {
+	const prefix = "Bearer "
+
+	return func(next echo.HandlerFunc) echo.HandlerFunc {
+		return func(c *echo.Context) error {
+			if apiKey == "" {
+				return next(c)
+			}
+
+			header := c.Request().Header.Get("Authorization")
+
+			token := strings.TrimPrefix(header, prefix)
+			if !strings.HasPrefix(header, prefix) ||
+				subtle.ConstantTimeCompare([]byte(token), []byte(apiKey)) != 1 {
+				return echo.NewHTTPError(http.StatusUnauthorized, "invalid or missing api key")
+			}
+
+			return next(c)
+		}
+	}
+}
+
 // CLI is the top-level command. The server is the default command (so bare
 // flags like `loge --port 6500` still start it), and `loge search` queries a
 // running server. CLI itself has no Run() method on purpose: kong invokes the
@@ -96,6 +142,12 @@ type ServeCmd struct {
 	S3RotateInterval time.Duration `name:"s3-rotate-interval"   default:"1m"    help:"how often the rotation loop runs"`
 	S3RotateGrace    time.Duration `name:"s3-rotate-grace"      default:"1m"    help:"keep a rotated segment's local copy this long before deleting it"`
 	S3FrameCacheSize int           `name:"s3-frame-cache-size"  default:"512"   help:"per-file decoded zstd frames to cache for segment reads (each frame is ~64 KiB)"`
+	S3PresignExpiry  time.Duration `name:"s3-presign-expiry"    default:"1h"    help:"validity of presigned segment URLs handed to client-side (--local) searches"`
+
+	// APIKey gates the client-side search plan endpoint. When set, callers must
+	// present it as a bearer token; when empty the endpoint is unauthenticated
+	// (matching the other endpoints' trusted-network posture).
+	APIKey string `name:"api-key" env:"LOGE_API_KEY" default:"" help:"shared secret required (as a bearer token) to request a client-side search plan; empty disables auth"`
 }
 
 func (c *ServeCmd) Run() error {
@@ -205,8 +257,12 @@ func (c *ServeCmd) Run() error {
 	// serve their reads back over HTTP. Ingest durability is unaffected — S3
 	// only receives already-durable, compacted, queryable segments, so an upload
 	// failure or S3 outage just keeps a segment local.
+	// store is retained beyond S3 setup so the client-side search plan endpoint
+	// can presign segment URLs. It stays nil when S3 tiering is disabled.
+	var store *S3Store
+
 	if c.S3Bucket != "" {
-		store, err := NewS3Store(ctx, S3Config{
+		store, err = NewS3Store(ctx, S3Config{
 			Bucket:         c.S3Bucket,
 			Prefix:         c.S3Prefix,
 			Endpoint:       c.S3Endpoint,
@@ -350,6 +406,75 @@ func (c *ServeCmd) Run() error {
 			Data:   results,
 		})
 	})
+
+	if store != nil && c.APIKey == "" {
+		slog.Warn("client-side search plan endpoint is unauthenticated; set --api-key to require a bearer token")
+	}
+
+	// Client-side search: the server scans only the hot tier itself and hands the
+	// caller a plan of presigned cold (S3) segments to scan on its own machine,
+	// moving the heavy historical scan off the server. Requires S3 tiering.
+	router.POST("/api/v1/search/plan", func(context *echo.Context) error {
+		defer func() {
+			_ = context.Request().Body.Close()
+		}()
+
+		if store == nil {
+			return echo.NewHTTPError(http.StatusBadRequest, "client-side search requires S3 tiering (set --s3-bucket)")
+		}
+
+		var request managers.QueryRequest
+		if err := json.NewDecoder(context.Request().Body).Decode(&request); err != nil {
+			return echo.NewHTTPError(http.StatusBadRequest, "invalid query request")
+		}
+
+		reqCtx := context.Request().Context()
+
+		// Hot tier: scan only the server's local/recent sources.
+		request.LocalOnly = true
+
+		hot, err := manager.Query(reqCtx, request)
+		if err != nil {
+			return fmt.Errorf("could not query hot tier: %w", err)
+		}
+
+		if hot == nil {
+			hot = []managers.QueryEntry{}
+		}
+
+		// Cold tier: the remote segments overlapping the window that the trigram
+		// filter cannot rule out — presigned for the client to scan directly.
+		segments, err := catalog.Overlapping(request.Start, request.End)
+		if err != nil {
+			return fmt.Errorf("could not prune segments: %w", err)
+		}
+
+		plan := make([]PlanSegment, 0, len(segments))
+
+		for _, segment := range segments {
+			if segment.Location != managers.LocationRemote {
+				continue
+			}
+
+			if request.Line != "" && !managers.LineFilterMayContain(segment.LineFilter, request.Line) {
+				continue
+			}
+
+			url, err := store.Presign(reqCtx, path.Join(c.S3Prefix, segment.ID), c.S3PresignExpiry)
+			if err != nil {
+				return fmt.Errorf("could not presign segment: %w", err)
+			}
+
+			plan = append(plan, PlanSegment{ID: segment.ID, URL: url})
+		}
+
+		return context.JSON(http.StatusOK, &PlanResponse{
+			Status:    "success",
+			Hot:       hot,
+			Segments:  plan,
+			ExpiresAt: time.Now().Add(c.S3PresignExpiry).UnixNano(),
+		})
+	}, bearerAuth(c.APIKey))
 
 	// Graceful shutdown handling: a SIGINT/SIGTERM cancels serverCtx, which drives
 	// StartConfig.Start to gracefully drain in-flight requests (up to GracefulTimeout)

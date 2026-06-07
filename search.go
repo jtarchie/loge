@@ -157,6 +157,12 @@ func (c *SearchCmd) query(ctx context.Context, request managers.QueryRequest) (Q
 
 	httpReq.Header.Set("Content-Type", "application/json")
 
+	// Present the key when reads are gated (server started with --api-key); the
+	// plan endpoint already does this, this keeps plain `loge search` working too.
+	if c.APIKey != "" {
+		httpReq.Header.Set("Authorization", "Bearer "+c.APIKey)
+	}
+
 	resp, err := http.DefaultClient.Do(httpReq)
 	if err != nil {
 		return response, fmt.Errorf("could not reach loge server at %s: %w", c.Addr, err)

@@ -50,6 +50,16 @@ type QueryResponse struct {
 	Data   []managers.QueryEntry `json:"data"`
 }
 
+// queryRequest is the HTTP query payload: the engine's QueryRequest plus an
+// optional raw LogQL selector. When Query is non-empty it is parsed with
+// ParseSelector to fill Matchers+Line, so the web UI (and any caller) can post a
+// single selector string like `{app="web"} |= "error"`; structured callers (the
+// CLI, existing clients) omit Query and keep posting matchers/line directly.
+type queryRequest struct {
+	managers.QueryRequest
+	Query string `json:"query"`
+}
+
 // StatsResponse summarizes the catalog (segment tiering, row count, time span)
 // for benchmarking and observability.
 type StatsResponse struct {
@@ -144,10 +154,12 @@ type ServeCmd struct {
 	S3FrameCacheSize int           `name:"s3-frame-cache-size"  default:"512"   help:"per-file decoded zstd frames to cache for segment reads (each frame is ~64 KiB)"`
 	S3PresignExpiry  time.Duration `name:"s3-presign-expiry"    default:"1h"    help:"validity of presigned segment URLs handed to client-side (--local) searches"`
 
-	// APIKey gates the client-side search plan endpoint. When set, callers must
-	// present it as a bearer token; when empty the endpoint is unauthenticated
-	// (matching the other endpoints' trusted-network posture).
-	APIKey string `name:"api-key" env:"LOGE_API_KEY" default:"" help:"shared secret required (as a bearer token) to request a client-side search plan; empty disables auth"`
+	// APIKey gates the read + search endpoints (/query, /labels, /stats,
+	// /search/plan) and the web UI's data calls. When set, callers must present
+	// it as a bearer token; when empty everything is unauthenticated (matching
+	// the trusted-network posture). Ingest (/push) and the static UI assets stay
+	// open regardless, so the login page can load.
+	APIKey string `name:"api-key" env:"LOGE_API_KEY" default:"" help:"shared secret required (as a bearer token) to read/query and to load the web UI's data; empty disables auth"`
 }
 
 func (c *ServeCmd) Run() error {
@@ -347,7 +359,14 @@ func (c *ServeCmd) Run() error {
 			Status: "success",
 			Data:   labels,
 		})
-	})
+	}, bearerAuth(c.APIKey))
+
+	// auth probe: 200 when the presented token is accepted (or no key is set),
+	// 401 otherwise. The web UI calls this on load to decide whether to show a
+	// login prompt; `required` tells it whether a token is needed at all.
+	router.GET("/api/v1/auth", func(context *echo.Context) error {
+		return context.JSON(http.StatusOK, map[string]bool{"required": c.APIKey != ""})
+	}, bearerAuth(c.APIKey))
 
 	// Stats summarizes the catalog so benchmarks can observe tiering (local vs
 	// remote segment counts), total rows, and the indexed time span.
@@ -380,19 +399,33 @@ func (c *ServeCmd) Run() error {
 		}
 
 		return context.JSON(http.StatusOK, &stats)
-	})
+	}, bearerAuth(c.APIKey))
 
 	router.POST("/api/v1/query", func(context *echo.Context) error {
 		defer func() {
 			_ = context.Request().Body.Close()
 		}()
 
-		var request managers.QueryRequest
+		var request queryRequest
 		if err := json.NewDecoder(context.Request().Body).Decode(&request); err != nil {
 			return echo.NewHTTPError(http.StatusBadRequest, "invalid query request")
 		}
 
-		results, err := manager.Query(context.Request().Context(), request)
+		// A raw LogQL selector (used by the web UI) takes precedence: parse it
+		// into the matchers+line filter the engine expects, reusing the same
+		// ParseSelector the CLI uses. Structured callers omit it and keep their
+		// matchers/line untouched.
+		if strings.TrimSpace(request.Query) != "" {
+			matchers, line, err := ParseSelector(request.Query)
+			if err != nil {
+				return echo.NewHTTPError(http.StatusBadRequest, "invalid query: "+err.Error())
+			}
+
+			request.Matchers = matchers
+			request.Line = line
+		}
+
+		results, err := manager.Query(context.Request().Context(), request.QueryRequest)
 		if err != nil {
 			return fmt.Errorf("could not query: %w", err)
 		}
@@ -405,7 +438,7 @@ func (c *ServeCmd) Run() error {
 			Status: "success",
 			Data:   results,
 		})
-	})
+	}, bearerAuth(c.APIKey))
 
 	if store != nil && c.APIKey == "" {
 		slog.Warn("client-side search plan endpoint is unauthenticated; set --api-key to require a bearer token")

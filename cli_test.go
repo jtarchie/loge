@@ -258,6 +258,139 @@ var _ = Describe("Running the application", func() {
 		Expect(queryResponse.Data[0].Labels).To(HaveKeyWithValue("app", "web"))
 		Expect(queryResponse.Data[0].Line).To(Equal("GET /index 200"))
 	})
+
+	It("queries pushed logs by a raw LogQL selector", func() {
+		outputPath, err := os.MkdirTemp("", "")
+		Expect(err).NotTo(HaveOccurred())
+
+		port, err := freeport.GetFreePort()
+		Expect(err).NotTo(HaveOccurred())
+
+		StartCLI(
+			"--port", strconv.Itoa(port),
+			"--buckets", "1",
+			"--payload-size", "1",
+			"--output-path", outputPath,
+		)
+
+		httpClient := req.C()
+		pushURL := fmt.Sprintf("http://localhost:%d/api/v1/push", port)
+		queryURL := fmt.Sprintf("http://localhost:%d/api/v1/query", port)
+
+		base := int64(1_700_000_000_000_000_000)
+		push := func(app, line string, ts int64) {
+			payload := loge.Payload{
+				Streams: loge.Streams{
+					loge.Entry{
+						Stream: loge.Stream{"app": app},
+						Values: loge.Values{loge.Value{strconv.FormatInt(ts, 10), line}},
+					},
+				},
+			}
+
+			Eventually(func() int {
+				response, _ := httpClient.R().SetRetryCount(3).SetBodyJsonMarshal(payload).Post(pushURL)
+
+				return response.StatusCode
+			}).Should(Equal(http.StatusOK))
+		}
+
+		push("web", "GET /index 200", base)
+		push("db", "SELECT slow query", base+1000)
+
+		Eventually(func() int {
+			matches, _ := filepath.Glob(filepath.Join(outputPath, "*.sqlite.zst"))
+
+			return len(matches)
+		}, "5s").Should(BeNumerically(">=", 2))
+
+		var queryResponse loge.QueryResponse
+
+		// A single LogQL selector (as the web UI sends) is parsed server-side
+		// into matchers + line filter, so it matches the same web row.
+		Eventually(func() int {
+			response, err := httpClient.R().
+				SetBodyJsonMarshal(map[string]any{"query": `{app="web"} |= "index"`}).
+				SetSuccessResult(&queryResponse).
+				Post(queryURL)
+			if err != nil || response.StatusCode != http.StatusOK {
+				return -1
+			}
+
+			return len(queryResponse.Data)
+		}, "5s").Should(Equal(1))
+
+		Expect(queryResponse.Data[0].Labels).To(HaveKeyWithValue("app", "web"))
+		Expect(queryResponse.Data[0].Line).To(Equal("GET /index 200"))
+
+		// A malformed selector is a 400, not a silently-empty result.
+		badResp, err := httpClient.R().
+			SetBodyJsonMarshal(map[string]any{"query": `{app=}`}).
+			Post(queryURL)
+		Expect(err).NotTo(HaveOccurred())
+		Expect(badResp.StatusCode).To(Equal(http.StatusBadRequest))
+	})
+
+	It("gates read endpoints behind the api key when one is set", func() {
+		outputPath, err := os.MkdirTemp("", "")
+		Expect(err).NotTo(HaveOccurred())
+
+		port, err := freeport.GetFreePort()
+		Expect(err).NotTo(HaveOccurred())
+
+		StartCLI(
+			"--port", strconv.Itoa(port),
+			"--buckets", "1",
+			"--payload-size", "1",
+			"--output-path", outputPath,
+			"--api-key", "secret",
+		)
+
+		httpClient := req.C()
+		base := fmt.Sprintf("http://localhost:%d", port)
+
+		// The server is up once the auth probe answers (401 without a token).
+		Eventually(func() int {
+			response, _ := httpClient.R().SetRetryCount(3).Get(base + "/api/v1/auth")
+
+			return response.StatusCode
+		}).Should(Equal(http.StatusUnauthorized))
+
+		auth := func(r *req.Request) *req.Request { return r.SetHeader("Authorization", "Bearer secret") }
+
+		// Reads require the token: 401 without, 200 with.
+		for _, path := range []string{"/api/v1/auth", "/api/v1/labels", "/api/v1/stats"} {
+			resp, err := httpClient.R().Get(base + path)
+			Expect(err).NotTo(HaveOccurred())
+			Expect(resp.StatusCode).To(Equal(http.StatusUnauthorized), path+" without key")
+
+			resp, err = auth(httpClient.R()).Get(base + path)
+			Expect(err).NotTo(HaveOccurred())
+			Expect(resp.StatusCode).To(Equal(http.StatusOK), path+" with key")
+		}
+
+		// The auth probe reports that a key is required.
+		var authResp struct {
+			Required bool `json:"required"`
+		}
+		_, err = auth(httpClient.R()).SetSuccessResult(&authResp).Get(base + "/api/v1/auth")
+		Expect(err).NotTo(HaveOccurred())
+		Expect(authResp.Required).To(BeTrue())
+
+		// Query is gated too.
+		resp, err := httpClient.R().SetBodyString(`{}`).Post(base + "/api/v1/query")
+		Expect(err).NotTo(HaveOccurred())
+		Expect(resp.StatusCode).To(Equal(http.StatusUnauthorized))
+
+		resp, err = auth(httpClient.R()).SetBodyString(`{}`).Post(base + "/api/v1/query")
+		Expect(err).NotTo(HaveOccurred())
+		Expect(resp.StatusCode).To(Equal(http.StatusOK))
+
+		// Ingest stays open so log shippers don't need the key.
+		resp, err = httpClient.R().SetBodyJsonMarshal(generatePayload()).Post(base + "/api/v1/push")
+		Expect(err).NotTo(HaveOccurred())
+		Expect(resp.StatusCode).NotTo(Equal(http.StatusUnauthorized))
+	})
 })
 
 // nolint: gosec

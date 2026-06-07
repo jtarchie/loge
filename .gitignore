@@ -203,3 +203,5 @@ dist
 # End of https://www.toptal.com/developers/gitignore/api/node,yarn,go,visualstudiocode
 
 tmp/
+# go-task fingerprint cache
+.task/

@@ -1,0 +1,61 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>loge</title>
+    <link
+      rel="icon"
+      href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16'%3E%3Crect width='16' height='16' rx='4' fill='%232f6feb'/%3E%3C/svg%3E"
+    />
+    <link rel="stylesheet" href="/assets/app.css" />
+  </head>
+  <body>
+    <header class="topbar">
+      <div class="brand">loge</div>
+      <button id="theme-toggle" class="ghost" type="button" title="Toggle light/dark" aria-label="Toggle theme">◐</button>
+    </header>
+
+    <!-- Login gate: shown only when the server requires an api key. -->
+    <div id="login" class="login" hidden>
+      <form id="login-form" class="login-card">
+        <h1>Sign in</h1>
+        <p class="muted">This loge server requires an API key.</p>
+        <input id="login-key" type="password" placeholder="API key" autocomplete="current-password" />
+        <button type="submit">Continue</button>
+        <p id="login-error" class="error" hidden></p>
+      </form>
+    </div>
+
+    <!-- Main app: query bar + results. -->
+    <main id="app" hidden>
+      <form id="query-bar" class="query-bar">
+        <input
+          id="selector"
+          class="selector"
+          type="text"
+          spellcheck="false"
+          autocomplete="off"
+          placeholder='{app="web"} |= "error"'
+        />
+        <select id="range" title="Time range">
+          <option value="300000">Last 5m</option>
+          <option value="900000">Last 15m</option>
+          <option value="3600000" selected>Last 1h</option>
+          <option value="21600000">Last 6h</option>
+          <option value="86400000">Last 24h</option>
+          <option value="0">Any time</option>
+        </select>
+        <input id="limit" class="limit" type="number" min="1" max="5000" value="100" title="Max results (≤5000)" />
+        <button id="run" type="submit">Run</button>
+        <button id="tail" class="ghost" type="button" aria-pressed="false">Tail</button>
+        <button id="sign-out" class="ghost" type="button" hidden>Sign out</button>
+      </form>
+
+      <div id="status" class="status muted"></div>
+      <ol id="results" class="results"></ol>
+    </main>
+
+    <script type="module" src="/assets/app.js"></script>
+  </body>
+</html>

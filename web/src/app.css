@@ -1,0 +1,257 @@
+/* Light/dark theming via CSS variables. The [data-theme] attribute on <html>
+   wins over the prefers-color-scheme default so the toggle is sticky. */
+:root {
+  --bg: #fbfbfc;
+  --panel: #ffffff;
+  --fg: #1c1d22;
+  --muted: #6b7080;
+  --border: #e3e5ea;
+  --accent: #2f6feb;
+  --accent-fg: #ffffff;
+  --chip-bg: #eef1f6;
+  --chip-fg: #3a4252;
+  --error: #c0392b;
+  --ts: #8a44c8;
+  --shadow: 0 1px 2px rgba(0, 0, 0, 0.06);
+  color-scheme: light;
+}
+
+@media (prefers-color-scheme: dark) {
+  :root {
+    --bg: #16181d;
+    --panel: #1d2026;
+    --fg: #e6e8ee;
+    --muted: #9aa0ad;
+    --border: #2c3038;
+    --accent: #5b8dff;
+    --accent-fg: #0b0d11;
+    --chip-bg: #272b33;
+    --chip-fg: #c3c9d6;
+    --error: #ff7a6b;
+    --ts: #c79bff;
+    --shadow: 0 1px 2px rgba(0, 0, 0, 0.4);
+    color-scheme: dark;
+  }
+}
+
+html[data-theme="light"] {
+  --bg: #fbfbfc;
+  --panel: #ffffff;
+  --fg: #1c1d22;
+  --muted: #6b7080;
+  --border: #e3e5ea;
+  --accent: #2f6feb;
+  --accent-fg: #ffffff;
+  --chip-bg: #eef1f6;
+  --chip-fg: #3a4252;
+  --error: #c0392b;
+  --ts: #8a44c8;
+  --shadow: 0 1px 2px rgba(0, 0, 0, 0.06);
+  color-scheme: light;
+}
+
+html[data-theme="dark"] {
+  --bg: #16181d;
+  --panel: #1d2026;
+  --fg: #e6e8ee;
+  --muted: #9aa0ad;
+  --border: #2c3038;
+  --accent: #5b8dff;
+  --accent-fg: #0b0d11;
+  --chip-bg: #272b33;
+  --chip-fg: #c3c9d6;
+  --error: #ff7a6b;
+  --ts: #c79bff;
+  --shadow: 0 1px 2px rgba(0, 0, 0, 0.4);
+  color-scheme: dark;
+}
+
+* {
+  box-sizing: border-box;
+}
+
+/* The hidden attribute must win over component display rules (e.g. .login sets
+   display: grid, which would otherwise override the UA [hidden] { display: none }
+   at equal specificity). */
+[hidden] {
+  display: none !important;
+}
+
+body {
+  margin: 0;
+  background: var(--bg);
+  color: var(--fg);
+  font: 14px/1.5 -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+}
+
+.muted {
+  color: var(--muted);
+}
+
+.error {
+  color: var(--error);
+}
+
+.topbar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 10px 16px;
+  border-bottom: 1px solid var(--border);
+  background: var(--panel);
+}
+
+.brand {
+  font-weight: 700;
+  letter-spacing: 0.04em;
+}
+
+button {
+  font: inherit;
+  padding: 7px 14px;
+  border-radius: 7px;
+  border: 1px solid var(--accent);
+  background: var(--accent);
+  color: var(--accent-fg);
+  cursor: pointer;
+}
+
+button.ghost {
+  background: transparent;
+  color: var(--fg);
+  border-color: var(--border);
+}
+
+button.ghost[aria-pressed="true"] {
+  border-color: var(--accent);
+  color: var(--accent);
+}
+
+input,
+select {
+  font: inherit;
+  padding: 7px 10px;
+  border-radius: 7px;
+  border: 1px solid var(--border);
+  background: var(--panel);
+  color: var(--fg);
+}
+
+input:focus,
+select:focus {
+  outline: 2px solid var(--accent);
+  outline-offset: -1px;
+}
+
+/* Login gate */
+.login {
+  position: fixed;
+  inset: 0;
+  display: grid;
+  place-items: center;
+  background: var(--bg);
+  z-index: 10;
+}
+
+.login-card {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  width: min(320px, 90vw);
+  padding: 24px;
+  border: 1px solid var(--border);
+  border-radius: 12px;
+  background: var(--panel);
+  box-shadow: var(--shadow);
+}
+
+.login-card h1 {
+  margin: 0;
+  font-size: 18px;
+}
+
+/* Query bar */
+.query-bar {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  padding: 12px 16px;
+  border-bottom: 1px solid var(--border);
+  background: var(--panel);
+  position: sticky;
+  top: 0;
+  z-index: 5;
+}
+
+.selector {
+  flex: 1 1 320px;
+  font-family: ui-monospace, SFMono-Regular, "SF Mono", Menlo, Consolas, monospace;
+}
+
+.limit {
+  width: 88px;
+}
+
+.status {
+  padding: 8px 16px;
+  min-height: 1em;
+}
+
+/* Results */
+.results {
+  list-style: none;
+  margin: 0;
+  padding: 0 8px 40px;
+  font-family: ui-monospace, SFMono-Regular, "SF Mono", Menlo, Consolas, monospace;
+  font-size: 13px;
+}
+
+.results li {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  gap: 10px;
+  padding: 6px 8px;
+  border-bottom: 1px solid var(--border);
+}
+
+.results li.fresh {
+  animation: flash 1.2s ease-out;
+}
+
+@keyframes flash {
+  from {
+    background: color-mix(in srgb, var(--accent) 18%, transparent);
+  }
+  to {
+    background: transparent;
+  }
+}
+
+.ts {
+  color: var(--ts);
+  white-space: nowrap;
+  flex: 0 0 auto;
+}
+
+.chips {
+  display: inline-flex;
+  flex-wrap: wrap;
+  gap: 4px;
+  flex: 0 0 auto;
+}
+
+.chip {
+  background: var(--chip-bg);
+  color: var(--chip-fg);
+  border-radius: 999px;
+  padding: 1px 8px;
+  font-size: 11px;
+  white-space: nowrap;
+}
+
+.line {
+  flex: 1 1 240px;
+  white-space: pre-wrap;
+  word-break: break-word;
+}

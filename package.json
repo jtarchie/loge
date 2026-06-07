@@ -4,6 +4,7 @@
     "esbuild": "^0.20.0"
   },
   "scripts": {
-    "build": "npx esbuild benchmark/"
+    "build": "npx esbuild benchmark/",
+    "build:web": "npx esbuild web/src/app.js web/src/app.css --bundle --minify --format=esm --outdir=webdist/assets && cp web/index.html webdist/index.html"
   }
 }

@@ -509,6 +509,14 @@ func (c *ServeCmd) Run() error {
 		})
 	}, bearerAuth(c.APIKey))
 
+	// Serve the embedded web UI (built into webdist/). The static assets are left
+	// unauthenticated so the login page can load; the UI's data calls carry the
+	// bearer token to the gated /api/v1/* endpoints above. FileFS maps GET / to
+	// index.html (Echo's static dir handler would 301/404 it instead).
+	uiFS := echo.MustSubFS(webDist, "webdist")
+	router.FileFS("/", "index.html", uiFS)
+	router.StaticFS("/assets", echo.MustSubFS(uiFS, "assets"))
+
 	// Graceful shutdown handling: a SIGINT/SIGTERM cancels serverCtx, which drives
 	// StartConfig.Start to gracefully drain in-flight requests (up to GracefulTimeout)
 	// before returning. Start swallows http.ErrServerClosed and returns nil on a

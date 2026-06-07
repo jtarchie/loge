@@ -390,6 +390,57 @@ var _ = Describe("Running the application", func() {
 		resp, err = httpClient.R().SetBodyJsonMarshal(generatePayload()).Post(base + "/api/v1/push")
 		Expect(err).NotTo(HaveOccurred())
 		Expect(resp.StatusCode).NotTo(Equal(http.StatusUnauthorized))
+
+		// The web UI's static assets stay open so the login page can load.
+		resp, err = httpClient.R().Get(base + "/")
+		Expect(err).NotTo(HaveOccurred())
+		Expect(resp.StatusCode).To(Equal(http.StatusOK))
+	})
+
+	It("serves the embedded web UI", func() {
+		outputPath, err := os.MkdirTemp("", "")
+		Expect(err).NotTo(HaveOccurred())
+
+		port, err := freeport.GetFreePort()
+		Expect(err).NotTo(HaveOccurred())
+
+		StartCLI(
+			"--port", strconv.Itoa(port),
+			"--buckets", "1",
+			"--payload-size", "1",
+			"--output-path", outputPath,
+		)
+
+		httpClient := req.C()
+		base := fmt.Sprintf("http://localhost:%d", port)
+
+		var index *req.Response
+		Eventually(func() int {
+			resp, err := httpClient.R().Get(base + "/")
+			if err != nil {
+				return -1
+			}
+			index = resp
+
+			return resp.StatusCode
+		}).Should(Equal(http.StatusOK))
+
+		Expect(index.GetContentType()).To(ContainSubstring("text/html"))
+		body := index.String()
+		Expect(body).To(ContainSubstring("<!doctype html"))
+		Expect(body).To(ContainSubstring(`id="app"`))
+		Expect(body).To(ContainSubstring("/assets/app.js"))
+
+		// Bundled assets are served too.
+		js, err := httpClient.R().Get(base + "/assets/app.js")
+		Expect(err).NotTo(HaveOccurred())
+		Expect(js.StatusCode).To(Equal(http.StatusOK))
+		Expect(js.GetContentType()).To(ContainSubstring("javascript"))
+
+		css, err := httpClient.R().Get(base + "/assets/app.css")
+		Expect(err).NotTo(HaveOccurred())
+		Expect(css.StatusCode).To(Equal(http.StatusOK))
+		Expect(css.GetContentType()).To(ContainSubstring("css"))
 	})
 })
 

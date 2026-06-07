@@ -7,7 +7,19 @@ tasks:
     - gofmt -w .
   lint: golangci-lint run --fix --timeout "10m"
   test: go run github.com/onsi/ginkgo/v2/ginkgo -tags fts5 -cover -race -r
-  server: go run -tags fts5 loge/main.go --port 6500 --payload-size 100000 --buckets 2
+  web:
+    desc: Bundle the web UI from web/ into webdist/ (embedded into the binary via go:embed)
+    cmds:
+    - yarn install
+    - yarn build:web
+    sources:
+    - web/**/*
+    generates:
+    - webdist/index.html
+    - webdist/assets/*
+  server:
+    deps: [web]
+    cmd: go run -tags fts5 loge/main.go --port 6500 --payload-size 100000 --buckets 2
   server-drop: go run -tags fts5 loge/main.go --port 6500 --payload-size 100000 --buckets 2 --drop-on-backpressure
   proto:
     desc: Generate protobuf Go code
@@ -20,6 +32,7 @@ tasks:
   default:
     cmds:
     - GOFLAGS='-mod=mod' go generate ./...
+    - task: web
     - task: format
     - task: lint
     - task: test

@@ -25,6 +25,7 @@ import (
 	"strings"
 	"sync"
 	"testing"
+	"time"
 
 	seekable "github.com/SaveTheRbtz/zstd-seekable-format-go/pkg"
 	_ "github.com/jtarchie/sqlitezstd" // registers the read-only "zstd" VFS
@@ -93,6 +94,7 @@ type variant struct {
 	tsIndex     bool
 	labelIDIdx  bool
 	dedupLabels bool
+	labelPairs  bool // build an inverted label_pairs(key,value,label_id) index
 }
 
 // buildSegmentDB writes a plain (uncompressed) .sqlite mirroring compactor.merge,
@@ -127,6 +129,13 @@ func buildSegmentDB(t *testing.T, dir string, v variant, rows []corpusRow, label
 	labelRowID := map[int]int64{}
 	var nextLabelRow int64
 	streamLabelRow := make([]int64, len(rows))
+	// inserted records every (rowID, payload) actually written so label_pairs can
+	// be built from the real rows (the non-dedup path writes the same set many times).
+	type insertedLabel struct {
+		id      int64
+		payload string
+	}
+	var inserted []insertedLabel
 	if v.dedupLabels {
 		for i, r := range rows {
 			id, ok := labelRowID[r.labelID]
@@ -137,6 +146,7 @@ func buildSegmentDB(t *testing.T, dir string, v variant, rows []corpusRow, label
 				if _, err := tx.Exec(`INSERT INTO labels (id, payload) VALUES (?, jsonb(?))`, id, labelPayloads[r.labelID]); err != nil {
 					t.Fatalf("label: %v", err)
 				}
+				inserted = append(inserted, insertedLabel{id, labelPayloads[r.labelID]})
 			}
 			streamLabelRow[i] = id
 		}
@@ -153,6 +163,7 @@ func buildSegmentDB(t *testing.T, dir string, v variant, rows []corpusRow, label
 				if _, err := tx.Exec(`INSERT INTO labels (id, payload) VALUES (?, jsonb(?))`, nextLabelRow, labelPayloads[r.labelID]); err != nil {
 					t.Fatalf("label: %v", err)
 				}
+				inserted = append(inserted, insertedLabel{nextLabelRow, labelPayloads[r.labelID]})
 			}
 			streamLabelRow[i] = labelRowID[r.labelID]
 		}
@@ -183,6 +194,34 @@ func buildSegmentDB(t *testing.T, dir string, v variant, rows []corpusRow, label
 		if _, err := tx.Exec(`CREATE VIRTUAL TABLE line_search USING fts5(line, content='', columnsize=0, tokenize="trigram");
 			INSERT INTO line_search(rowid, line) SELECT id, line FROM streams;`); err != nil {
 			t.Fatalf("fts: %v", err)
+		}
+	}
+
+	if v.labelPairs {
+		// Inverted index: one row per (key, value, label_id). The composite PK is
+		// the index a `key=value` matcher probes; reaching the matching streams then
+		// needs idx_streams_label_id, so build it too.
+		if _, err := tx.Exec(`CREATE TABLE label_pairs (key TEXT, value TEXT, label_id INTEGER, PRIMARY KEY (key, value, label_id)) WITHOUT ROWID`); err != nil {
+			t.Fatalf("label_pairs: %v", err)
+		}
+		stmt, err := tx.Prepare(`INSERT OR IGNORE INTO label_pairs (key, value, label_id) VALUES (?, ?, ?)`)
+		if err != nil {
+			t.Fatalf("label_pairs prep: %v", err)
+		}
+		for _, l := range inserted {
+			var kv map[string]string
+			if err := json.Unmarshal([]byte(l.payload), &kv); err != nil {
+				t.Fatalf("label_pairs decode: %v", err)
+			}
+			for k, val := range kv {
+				if _, err := stmt.Exec(k, val, l.id); err != nil {
+					t.Fatalf("label_pairs insert: %v", err)
+				}
+			}
+		}
+		_ = stmt.Close()
+		if _, err := tx.Exec(`CREATE INDEX IF NOT EXISTS idx_streams_label_id ON streams(label_id)`); err != nil {
+			t.Fatalf("label_id idx: %v", err)
 		}
 	}
 
@@ -323,20 +362,9 @@ func TestEndToEndSizes(t *testing.T) {
 	if len(segs) != 1 {
 		t.Fatalf("expected 1 segment, got %d", len(segs))
 	}
-	hot := fileSize(t, segs[0])
+	seg := fileSize(t, segs[0])
 
-	// Cold-tier copy actually uploaded.
-	id := filepath.Base(segs[0])
-	stripped, err := stripFTSForUpload(dir, id, segs[0])
-	if err != nil {
-		t.Fatalf("strip: %v", err)
-	}
-	cold := fileSize(t, stripped)
-	_ = os.Remove(stripped)
-
-	t.Logf("REAL end-to-end (40k rows):")
-	t.Logf("  local hot segment (indexed, Best) : %s", human(hot))
-	t.Logf("  cold S3 copy (FTS-stripped)       : %s  (%.0f%% smaller)", human(cold), 100*(1-float64(cold)/float64(hot)))
+	t.Logf("REAL end-to-end (40k rows): segment (no FTS, Best) = %s; hot and cold tiers are now the same file (uploaded as-is).", human(seg))
 }
 
 // corpusToPayloads groups consecutive rows that share a label set into Entries.
@@ -500,5 +528,360 @@ func human64(n int64) string {
 		return fmt.Sprintf("%.1fKB", float64(n)/(1<<10))
 	default:
 		return fmt.Sprintf("%dB", n)
+	}
+}
+
+// --- Query-latency benchmark -------------------------------------------------
+//
+// Answers two questions with numbers, on the real compressed read path:
+//   1. Does the FTS index earn its size, or is a LIKE scan fast enough?
+//   2. Is an inverted label index worth its size vs the json_extract scan?
+//
+// Run: go test -tags "fts5 sqlite_dbstat sizebench" -run QueryLatency -v -timeout 30m .
+
+const (
+	rareNeedle   = "qzx7rare"          // injected into ~1% of lines, uniformly
+	commonNeedle = "request completed" // template 0 emits it (~25% of lines)
+	absentNeedle = "nonexistentzzz"    // never present (filter prunes in prod)
+	// sparseNeedle is the FTS best case / LIKE worst case: it occurs only ~30
+	// times and ONLY in the oldest 10% of rows, so an ORDER BY timestamp DESC
+	// LIMIT scan cannot short-circuit and must read almost the whole segment.
+	sparseNeedle = "wq9sparseold"
+	sparseCount  = 30
+)
+
+// buildCorpusCard is buildCorpus with a cardinality knob and embedded needles at
+// known selectivity, so keyword/label scenarios have exact, repeatable hit rates.
+func buildCorpusCard(n int, highCard bool) ([]corpusRow, []string) {
+	rng := rand.New(rand.NewSource(42)) //nolint:gosec // deterministic corpus
+
+	apps := []string{"api", "web", "worker", "db", "cache", "gateway"}
+	envs := []string{"prod", "staging"}
+
+	var labelPayloads []string
+	if highCard {
+		// ~2000 distinct sets: a specific pod selects 1/2000 of rows.
+		const sets = 2000
+		for i := 0; i < sets; i++ {
+			labelPayloads = append(labelPayloads, MarshalLabels(map[string]string{
+				"app":      apps[rng.Intn(len(apps))],
+				"env":      envs[rng.Intn(len(envs))],
+				"region":   "us-east-1",
+				"pod":      fmt.Sprintf("pod-%d", i),
+				"instance": fmt.Sprintf("i-%06d", rng.Intn(100000)),
+			}))
+		}
+	} else {
+		for _, app := range apps {
+			for _, env := range envs {
+				labelPayloads = append(labelPayloads, MarshalLabels(map[string]string{
+					"app": app, "env": env, "region": "us-east-1",
+				}))
+			}
+		}
+	}
+
+	methods := []string{"GET", "POST", "PUT", "DELETE"}
+	paths := []string{"/api/v1/users", "/api/v1/orders", "/api/v1/items", "/healthz", "/metrics"}
+	upstreams := []string{"db-primary", "db-replica", "cache-01", "auth-svc"}
+	templates := []func() string{
+		func() string {
+			return fmt.Sprintf(`level=info msg="request completed" method=%s path=%s status=%d duration=%dms bytes=%d`,
+				methods[rng.Intn(len(methods))], paths[rng.Intn(len(paths))], 200+rng.Intn(5)*100, rng.Intn(800), rng.Intn(50000))
+		},
+		func() string {
+			return fmt.Sprintf(`level=warn msg="slow query" query_id=%d duration=%dms rows=%d`, rng.Intn(1_000_000), 500+rng.Intn(5000), rng.Intn(10000))
+		},
+		func() string {
+			return fmt.Sprintf(`level=error msg="connection refused" upstream=%s retry=%d`, upstreams[rng.Intn(len(upstreams))], rng.Intn(5))
+		},
+		func() string {
+			return fmt.Sprintf(`level=debug msg="cache lookup" key=user:%d hit=%t`, rng.Intn(100000), rng.Intn(2) == 0)
+		},
+	}
+
+	rareEvery := n / 1000 // ~0.1% of rows carry the rare needle
+	if rareEvery < 1 {
+		rareEvery = 1
+	}
+
+	// Sparse needle: sparseCount occurrences confined to the oldest 10% of rows.
+	sparseRows := map[int]struct{}{}
+	oldEnd := n / 10
+	if oldEnd < sparseCount {
+		oldEnd = n
+	}
+	for k := 0; k < sparseCount && oldEnd > 0; k++ {
+		sparseRows[k*oldEnd/sparseCount] = struct{}{}
+	}
+
+	rows := make([]corpusRow, n)
+	base := int64(1_700_000_000_000_000_000)
+	for i := range rows {
+		line := templates[rng.Intn(len(templates))]()
+		if i%rareEvery == 0 {
+			line += " " + rareNeedle
+		}
+		if _, ok := sparseRows[i]; ok {
+			line += " " + sparseNeedle
+		}
+		rows[i] = corpusRow{
+			timestamp: base + int64(i)*1_000_000, // ~1ms apart, monotonic
+			line:      line,
+			labelID:   rng.Intn(len(labelPayloads)),
+		}
+	}
+	return rows, labelPayloads
+}
+
+// keywordSQL mirrors buildQuery's keyword path: the literal LIKE always runs; the
+// FTS join is added only when useFTS (local segments).
+func keywordSQL(useFTS bool, term string, start, end int64, limit int) (string, []any) {
+	var sb strings.Builder
+	sb.WriteString(`SELECT s.timestamp, s.line, json(l.payload) FROM streams s JOIN labels l ON l.id = s.label_id`)
+	var args []any
+	if useFTS {
+		sb.WriteString(` JOIN line_search ON line_search.rowid = s.id`)
+	}
+	sb.WriteString(` WHERE 1=1`)
+	if useFTS {
+		sb.WriteString(` AND line_search MATCH ?`)
+		args = append(args, `"`+strings.ReplaceAll(term, `"`, `""`)+`"`)
+	}
+	if start != 0 {
+		sb.WriteString(` AND s.timestamp >= ?`)
+		args = append(args, start)
+	}
+	if end != 0 {
+		sb.WriteString(` AND s.timestamp <= ?`)
+		args = append(args, end)
+	}
+	sb.WriteString(` AND s.line LIKE ?`)
+	args = append(args, "%"+term+"%")
+	sb.WriteString(` ORDER BY s.timestamp DESC, s.id DESC LIMIT ?`)
+	args = append(args, limit)
+	return sb.String(), args
+}
+
+// labelSQL mirrors buildQuery's label path: json_extract post-filter, or an
+// inverted label_pairs subquery when useLabelPairs.
+func labelSQL(useLabelPairs bool, key, val, term string, start, end int64, limit int) (string, []any) {
+	var sb strings.Builder
+	sb.WriteString(`SELECT s.timestamp, s.line, json(l.payload) FROM streams s JOIN labels l ON l.id = s.label_id WHERE 1=1`)
+	var args []any
+	if useLabelPairs {
+		sb.WriteString(` AND s.label_id IN (SELECT label_id FROM label_pairs WHERE key = ? AND value = ?)`)
+		args = append(args, key, val)
+	} else {
+		sb.WriteString(` AND json_extract(l.payload, ?) = ?`)
+		args = append(args, `$."`+strings.ReplaceAll(key, `"`, `""`)+`"`, val)
+	}
+	if term != "" {
+		sb.WriteString(` AND s.line LIKE ?`)
+		args = append(args, "%"+term+"%")
+	}
+	if start != 0 {
+		sb.WriteString(` AND s.timestamp >= ?`)
+		args = append(args, start)
+	}
+	if end != 0 {
+		sb.WriteString(` AND s.timestamp <= ?`)
+		args = append(args, end)
+	}
+	sb.WriteString(` ORDER BY s.timestamp DESC, s.id DESC LIMIT ?`)
+	args = append(args, limit)
+	return sb.String(), args
+}
+
+// buildZst builds a plain segment for v and compresses it (Best level) to a kept
+// .sqlite.zst, returning its path.
+func buildZst(t *testing.T, dir string, v variant, rows []corpusRow, labelPayloads []string) string {
+	t.Helper()
+	plain := buildSegmentDB(t, dir, v, rows, labelPayloads)
+	if err := compressWithPool(plain, bestEncoderPool); err != nil {
+		t.Fatalf("compress: %v", err)
+	}
+	return plain + ".zst"
+}
+
+func runQuery(db *sql.DB, query string, args []any) (int, error) {
+	rows, err := db.Query(query, args...)
+	if err != nil {
+		return 0, err
+	}
+	defer func() { _ = rows.Close() }()
+
+	cols, err := rows.Columns()
+	if err != nil {
+		return 0, err
+	}
+	holders := make([]any, len(cols))
+	for i := range holders {
+		var v any
+		holders[i] = &v
+	}
+
+	n := 0
+	for rows.Next() {
+		if err := rows.Scan(holders...); err != nil {
+			return n, err
+		}
+		n++
+	}
+	return n, rows.Err()
+}
+
+// measureCold copies the archive to a fresh name (so the sqlitezstd frame cache
+// is empty) and times one full query — this captures FTS's frame-skipping
+// advantage, which a warm decoded-frame cache would hide. Median of `copies`.
+func measureCold(t *testing.T, zst, query string, args []any, copies int) (time.Duration, int) {
+	t.Helper()
+	var durs []time.Duration
+	var rowsOut int
+	for k := 0; k < copies; k++ {
+		dst := strings.TrimSuffix(zst, ".zst") + fmt.Sprintf(".cold%d.zst", k)
+		if err := copyFile(zst, dst); err != nil {
+			t.Fatalf("copy: %v", err)
+		}
+		db, err := sql.Open("sqlite3", dst+"?vfs=zstd")
+		if err != nil {
+			t.Fatalf("open: %v", err)
+		}
+		db.SetMaxOpenConns(1)
+		start := time.Now()
+		n, err := runQuery(db, query, args)
+		el := time.Since(start)
+		_ = db.Close()
+		_ = os.Remove(dst)
+		if err != nil {
+			t.Fatalf("cold query: %v", err)
+		}
+		durs = append(durs, el)
+		rowsOut = n
+	}
+	return medianDur(durs), rowsOut
+}
+
+// measureWarm times the query with the frame cache primed (steady state).
+func measureWarm(t *testing.T, zst, query string, args []any, runs int) (time.Duration, int) {
+	t.Helper()
+	db, err := sql.Open("sqlite3", zst+"?vfs=zstd")
+	if err != nil {
+		t.Fatalf("open: %v", err)
+	}
+	db.SetMaxOpenConns(1)
+	defer func() { _ = db.Close() }()
+
+	n, err := runQuery(db, query, args) // prime
+	if err != nil {
+		t.Fatalf("warm prime: %v", err)
+	}
+
+	var durs []time.Duration
+	for i := 0; i < runs; i++ {
+		start := time.Now()
+		if _, err := runQuery(db, query, args); err != nil {
+			t.Fatalf("warm query: %v", err)
+		}
+		durs = append(durs, time.Since(start))
+	}
+	return medianDur(durs), n
+}
+
+func medianDur(d []time.Duration) time.Duration {
+	if len(d) == 0 {
+		return 0
+	}
+	s := append([]time.Duration(nil), d...)
+	sort.Slice(s, func(i, j int) bool { return s[i] < s[j] })
+	return s[len(s)/2]
+}
+
+func ms(d time.Duration) string { return fmt.Sprintf("%.1fms", float64(d.Microseconds())/1000) }
+
+func TestQueryLatency(t *testing.T) {
+	type corpusCfg struct {
+		name     string
+		n        int
+		highCard bool
+	}
+	corpora := []corpusCfg{
+		{"low_100k", 100_000, false},
+		{"low_1M", 1_000_000, false},
+		{"high_100k", 100_000, true},
+		{"high_1M", 1_000_000, true},
+	}
+
+	const limit = 100
+
+	for _, c := range corpora {
+		rows, labelPayloads := buildCorpusCard(c.n, c.highCard)
+		dir := t.TempDir()
+		base := rows[0].timestamp
+		span := rows[len(rows)-1].timestamp - base
+		winStart := base + span*99/100 // most-recent ~1% window
+
+		zfts := buildZst(t, dir, variant{name: "fts", pageSize: 4096, fts: true, tsIndex: true}, rows, labelPayloads)
+		zno := buildZst(t, dir, variant{name: "nofts", pageSize: 4096, tsIndex: true}, rows, labelPayloads)
+		zlp := buildZst(t, dir, variant{name: "lp", pageSize: 4096, tsIndex: true, labelPairs: true}, rows, labelPayloads)
+
+		t.Logf("================ %s: %d rows, %d label sets ================", c.name, c.n, len(labelPayloads))
+		t.Logf("segment size (.sqlite.zst, Best): fts=%s  nofts=%s  labelpairs=%s",
+			human(fileSize(t, zfts)), human(fileSize(t, zno)), human(fileSize(t, zlp)))
+
+		type run struct {
+			scenario, variant, zst, sql string
+			args                        []any
+		}
+		var runs []run
+		add := func(scn, varn, zst, sqlText string, args []any) {
+			runs = append(runs, run{scn, varn, zst, sqlText, args})
+		}
+
+		// Keyword scenarios: FTS vs LIKE-only.
+		for _, kw := range []struct{ name, term string }{
+			{"kw_rare", rareNeedle}, {"kw_common", commonNeedle}, {"kw_absent", absentNeedle},
+			{"kw_sparse_old", sparseNeedle},
+		} {
+			s, a := keywordSQL(true, kw.term, 0, 0, limit)
+			add(kw.name, "fts", zfts, s, a)
+			s, a = keywordSQL(false, kw.term, 0, 0, limit)
+			add(kw.name, "nofts", zno, s, a)
+		}
+		// Rare keyword constrained to a recent window (the live-tail case).
+		s, a := keywordSQL(true, rareNeedle, winStart, 0, limit)
+		add("kw_rare_tb", "fts", zfts, s, a)
+		s, a = keywordSQL(false, rareNeedle, winStart, 0, limit)
+		add("kw_rare_tb", "nofts", zno, s, a)
+
+		// Label scenarios: json_extract scan vs label_pairs.
+		labelKey, labelVal := "app", "api"
+		if c.highCard {
+			labelKey, labelVal = "pod", "pod-7" // selects ~1/2000 of rows
+		}
+		s, a = labelSQL(false, labelKey, labelVal, "", 0, 0, limit)
+		add("label", "nofts(json)", zno, s, a)
+		s, a = labelSQL(true, labelKey, labelVal, "", 0, 0, limit)
+		add("label", "labelpairs", zlp, s, a)
+
+		if c.highCard { // also a broad label (app=api spans many sets)
+			s, a = labelSQL(false, "app", "api", "", 0, 0, limit)
+			add("label_broad", "nofts(json)", zno, s, a)
+			s, a = labelSQL(true, "app", "api", "", 0, 0, limit)
+			add("label_broad", "labelpairs", zlp, s, a)
+		}
+
+		// Label + keyword combined.
+		s, a = labelSQL(false, labelKey, labelVal, commonNeedle, 0, 0, limit)
+		add("label+kw", "nofts(json)", zno, s, a)
+		s, a = labelSQL(true, labelKey, labelVal, commonNeedle, 0, 0, limit)
+		add("label+kw", "labelpairs", zlp, s, a)
+
+		t.Logf("%-12s %-13s %10s %10s %7s", "scenario", "variant", "cold", "warm", "rows")
+		for _, r := range runs {
+			cold, n := measureCold(t, r.zst, r.sql, r.args, 3)
+			warm, _ := measureWarm(t, r.zst, r.sql, r.args, 5)
+			t.Logf("%-12s %-13s %10s %10s %7d", r.scenario, r.variant, ms(cold), ms(warm), n)
+		}
 	}
 }

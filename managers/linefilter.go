@@ -61,6 +61,12 @@ func AddTrigramHashes(line string, set map[uint64]struct{}) {
 // BuildLineFilter builds and serializes a binary-fuse filter from a trigram-hash
 // set. Returns nil bytes for an empty set (nothing to prune by).
 func BuildLineFilter(set map[uint64]struct{}) ([]byte, error) {
+	return buildFuse(set)
+}
+
+// buildFuse serializes a binary-fuse filter over a hash set. Returns nil bytes
+// for an empty set (nothing to prune by). Shared by the line and label filters.
+func buildFuse(set map[uint64]struct{}) ([]byte, error) {
 	if len(set) == 0 {
 		return nil, nil
 	}
@@ -72,15 +78,77 @@ func BuildLineFilter(set map[uint64]struct{}) ([]byte, error) {
 
 	filter, err := xorfilter.PopulateBinaryFuse8(keys)
 	if err != nil {
-		return nil, fmt.Errorf("could not build line filter: %w", err)
+		return nil, fmt.Errorf("could not build fuse filter: %w", err)
 	}
 
 	var buf bytes.Buffer
 	if err := filter.Save(&buf); err != nil {
-		return nil, fmt.Errorf("could not serialize line filter: %w", err)
+		return nil, fmt.Errorf("could not serialize fuse filter: %w", err)
 	}
 
 	return buf.Bytes(), nil
+}
+
+// Each compacted segment also carries a binary-fuse filter of its exact label
+// key=value pairs, stored in the segment metadata and mirrored into the catalog.
+// An equality matcher (app="api") tests the pair against it to skip whole
+// segments that hold no such stream — with zero file/S3 reads. Benchmarks showed
+// an in-segment inverted label index costs +8–51% of the segment size and only
+// helps selective high-cardinality labels; this filter gets the cross-segment
+// pruning for near-zero size and leaves the within-segment scan to json_extract.
+//
+// Correctness: no false negatives, so an "absent" verdict is always true and a
+// segment is never wrongly skipped. Only equality matchers prune; !=/regex do
+// not. The json_extract filter remains the binding filter.
+
+// fnv64aBytes is FNV-1a over all of b — a stable hash (stored at compaction,
+// queried in any later process).
+func fnv64aBytes(b []byte) uint64 {
+	h := uint64(fnvOffset64)
+	for _, c := range b {
+		h = (h ^ uint64(c)) * fnvPrime64
+	}
+
+	return h
+}
+
+// labelPairHash hashes an exact key=value pair. The NUL separator keeps e.g.
+// {"ab","c"} and {"a","bc"} from colliding.
+func labelPairHash(key, value string) uint64 {
+	b := make([]byte, 0, len(key)+1+len(value))
+	b = append(b, key...)
+	b = append(b, 0)
+	b = append(b, value...)
+
+	return fnv64aBytes(b)
+}
+
+// AddLabelPairHash adds the hash of an exact key=value pair to set.
+func AddLabelPairHash(key, value string, set map[uint64]struct{}) {
+	set[labelPairHash(key, value)] = struct{}{}
+}
+
+// BuildLabelFilter builds and serializes a binary-fuse filter from a set of
+// label-pair hashes. Returns nil bytes for an empty set.
+func BuildLabelFilter(set map[uint64]struct{}) ([]byte, error) {
+	return buildFuse(set)
+}
+
+// LabelFilterMayContain reports whether a segment whose label filter is blob
+// could hold a stream with the exact label key=value. It returns true (must
+// scan) when there is no filter or the blob is unreadable; false only when the
+// pair is provably absent.
+func LabelFilterMayContain(blob []byte, key, value string) bool {
+	if len(blob) == 0 {
+		return true
+	}
+
+	filter, err := xorfilter.LoadBinaryFuse8(bytes.NewReader(blob))
+	if err != nil {
+		return true
+	}
+
+	return filter.Contains(labelPairHash(key, value))
 }
 
 // LineFilterMayContain reports whether a segment whose trigram filter is blob

@@ -5,34 +5,25 @@ import (
 	"testing"
 )
 
-func TestBuildQueryLineFilterPerTier(t *testing.T) {
+func TestBuildQueryKeywordIsLikeOnly(t *testing.T) {
 	t.Parallel()
 
 	req := QueryRequest{Line: "connection refused"}
 
-	// Local segments (useLineIndex=true): trigram MATCH on the full keyword plus
-	// the LIKE exact filter.
-	indexed, indexedArgs := buildQuery(req, 100, true)
-	if !strings.Contains(indexed, "line_search MATCH") {
-		t.Fatalf("indexed query should MATCH: %s", indexed)
+	// There is no FTS index anywhere: keyword filtering is always a literal LIKE
+	// (the timestamp-ordered scan short-circuits at LIMIT, and the catalog line
+	// filter prunes whole segments that cannot contain the keyword).
+	query, args := buildQuery(req, 100)
+	if strings.Contains(query, "line_search MATCH") {
+		t.Errorf("query must not MATCH (FTS retired): %s", query)
 	}
 
-	if !containsArg(indexedArgs, `"connection refused"`) {
-		t.Errorf("MATCH term should be the full keyword, args=%v", indexedArgs)
+	if !strings.Contains(query, "s.line LIKE") {
+		t.Errorf("keyword query must LIKE: %s", query)
 	}
 
-	if !strings.Contains(indexed, "s.line LIKE") {
-		t.Errorf("indexed query must also LIKE: %s", indexed)
-	}
-
-	// Remote segments (useLineIndex=false): a sequential LIKE only — no FTS.
-	likeOnly, _ := buildQuery(req, 100, false)
-	if strings.Contains(likeOnly, "line_search MATCH") {
-		t.Errorf("LIKE-only query must not MATCH: %s", likeOnly)
-	}
-
-	if !strings.Contains(likeOnly, "s.line LIKE") {
-		t.Errorf("LIKE-only query must still LIKE: %s", likeOnly)
+	if !containsArg(args, "%connection refused%") {
+		t.Errorf("LIKE arg should wrap the keyword, args=%v", args)
 	}
 }
 

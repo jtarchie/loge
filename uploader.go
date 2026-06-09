@@ -2,18 +2,14 @@ package loge
 
 import (
 	"context"
-	"database/sql"
 	"fmt"
-	"io"
 	"log/slog"
 	"os"
 	"path"
 	"strings"
 	"time"
 
-	seekable "github.com/SaveTheRbtz/zstd-seekable-format-go/pkg"
 	"github.com/jtarchie/loge/managers"
-	"github.com/klauspost/compress/zstd"
 )
 
 const (
@@ -248,33 +244,21 @@ func (u *Uploader) Rotate(ctx context.Context) (int, error) {
 	return rotated, nil
 }
 
-// rotateSegment uploads one segment's cold-tier copy and flips the catalog to
-// remote. The uploaded copy is FTS-stripped (see stripFTSForUpload): remote
-// queries never use the trigram index — they scan with LIKE and the catalog
-// line filter prunes whole segments — so it is dead weight (typically the
-// majority of a segment's bytes) over the network and in storage. The local hot
-// copy keeps its index until the grace sweep deletes it. Any failure leaves the
+// rotateSegment uploads one segment to the cold tier and flips the catalog to
+// remote. Segments carry no FTS index (it was retired: a trigram index cost
+// ~3.3x the size yet lost to a plain LIKE scan on the queries that dominate, and
+// the catalog line filter already prunes whole segments), so the local file is
+// uploaded as-is — hot and cold tiers share one shape. Any failure leaves the
 // segment local and is retried next cycle.
 func (u *Uploader) rotateSegment(ctx context.Context, segment managers.SegmentMeta) error {
-	if _, err := os.Stat(segment.LocalPath); err != nil {
+	info, err := os.Stat(segment.LocalPath)
+	if err != nil {
 		return fmt.Errorf("missing local segment: %w", err)
-	}
-
-	strippedPath, err := stripFTSForUpload(u.dir, segment.ID, segment.LocalPath)
-	if err != nil {
-		return fmt.Errorf("could not strip segment for upload: %w", err)
-	}
-	defer func() { _ = os.Remove(strippedPath) }()
-
-	// Verify against the artifact we actually upload, not the local original.
-	info, err := os.Stat(strippedPath)
-	if err != nil {
-		return fmt.Errorf("could not stat stripped segment: %w", err)
 	}
 
 	key := path.Join(u.prefix, segment.ID)
 
-	readURL, err := u.store.Put(ctx, key, strippedPath)
+	readURL, err := u.store.Put(ctx, key, segment.LocalPath)
 	if err != nil {
 		return fmt.Errorf("could not upload: %w", err)
 	}
@@ -293,98 +277,6 @@ func (u *Uploader) rotateSegment(ctx context.Context, segment managers.SegmentMe
 	}
 
 	return nil
-}
-
-// stripFTSForUpload writes a cold-tier copy of the compressed segment at localZst
-// with the FTS trigram index removed, and returns the path to the new compressed
-// (.zst) file. It decompresses the segment, drops line_search (and a legacy
-// label_id index if present), VACUUMs to reclaim the freed pages, and
-// recompresses with the segment encoder. The labels, streams, metadata (min/max
-// bounds and the line filter) and the timestamp index are all preserved, so
-// remote LIKE/time-range queries and catalog reconciliation are unaffected. The
-// caller owns the returned file and must remove it after uploading.
-func stripFTSForUpload(dir, id, localZst string) (string, error) {
-	// A temp basename that no query glob matches: the watcher tracks
-	// `bucket-*.sqlite.zst` (with a catalog) or `*.sqlite.zst`, and ".strip" /
-	// ".strip.zst" end in neither.
-	plain := path.Join(dir, strings.TrimSuffix(id, ".zst")+".strip")
-
-	if err := decompressSegment(localZst, plain); err != nil {
-		_ = os.Remove(plain)
-
-		return "", fmt.Errorf("could not decompress segment: %w", err)
-	}
-
-	if err := dropFTSIndex(plain); err != nil {
-		_ = os.Remove(plain)
-
-		return "", err
-	}
-
-	// compressSegment writes plain+".zst" and removes plain on success.
-	if err := compressSegment(plain); err != nil {
-		_ = os.Remove(plain)
-		_ = os.Remove(plain + ".zst")
-
-		return "", fmt.Errorf("could not compress stripped segment: %w", err)
-	}
-
-	return plain + ".zst", nil
-}
-
-// decompressSegment writes the decompressed contents of a seekable-zstd file to
-// plainPath.
-func decompressSegment(srcZst, plainPath string) error {
-	in, err := os.Open(srcZst)
-	if err != nil {
-		return fmt.Errorf("could not open segment: %w", err)
-	}
-	defer func() { _ = in.Close() }()
-
-	decoder, err := zstd.NewReader(nil)
-	if err != nil {
-		return fmt.Errorf("could not create decoder: %w", err)
-	}
-	defer decoder.Close()
-
-	reader, err := seekable.NewReader(in, decoder)
-	if err != nil {
-		return fmt.Errorf("could not open seekable reader: %w", err)
-	}
-	defer func() { _ = reader.Close() }()
-
-	out, err := os.Create(plainPath)
-	if err != nil {
-		return fmt.Errorf("could not create decompressed file: %w", err)
-	}
-	defer func() { _ = out.Close() }()
-
-	if _, err := io.Copy(out, reader); err != nil {
-		return fmt.Errorf("could not decompress: %w", err)
-	}
-
-	return out.Close()
-}
-
-// dropFTSIndex removes the FTS trigram index (and a legacy label_id index, if
-// any) from the plain SQLite file and VACUUMs so the freed pages are reclaimed.
-func dropFTSIndex(plainPath string) error {
-	client, err := sql.Open("sqlite3", plainPath)
-	if err != nil {
-		return fmt.Errorf("could not open stripped segment: %w", err)
-	}
-	defer func() { _ = client.Close() }()
-
-	if _, err := client.Exec(`
-		PRAGMA temp_store = FILE;
-		DROP TABLE IF EXISTS line_search;
-		DROP INDEX IF EXISTS idx_streams_label_id;
-		VACUUM;
-	`); err != nil {
-		return fmt.Errorf("could not drop fts index: %w", err)
-	}
-
-	return client.Close()
 }
 
 // Sweep deletes the local copies of remote segments whose grace window has

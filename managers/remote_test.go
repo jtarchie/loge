@@ -197,6 +197,34 @@ var _ = Describe("Query over remote (HTTP) segments", func() {
 		Expect(hits).To(HaveLen(1))
 		Expect(requests.Load()).To(BeNumerically(">", 0))
 	})
+
+	It("skips a remote segment whose label filter rejects an equality matcher (zero HTTP reads)", func() {
+		early := int64(1_700_000_000_000_000_000)
+		produceRemoteSegment(early, 5, "web") // every stream has app="web"
+
+		manager, err := managers.NewLocal(dir, managers.WithCatalog(catalog))
+		Expect(err).NotTo(HaveOccurred())
+		DeferCleanup(func() { _ = manager.Close() })
+
+		// An equality matcher for a label value the segment never holds is pruned
+		// by the catalog label filter — the segment is never fetched over HTTP.
+		requests.Store(0)
+		results, err := manager.Query(context.Background(), managers.QueryRequest{
+			Matchers: []managers.Matcher{{Name: "app", Value: "db", Type: "="}},
+		})
+		Expect(err).NotTo(HaveOccurred())
+		Expect(results).To(BeEmpty())
+		Expect(requests.Load()).To(Equal(int64(0)), "label filter must skip the segment with zero HTTP reads")
+
+		// Sanity: a matcher for the present value still fetches and returns rows.
+		requests.Store(0)
+		hits, err := manager.Query(context.Background(), managers.QueryRequest{
+			Matchers: []managers.Matcher{{Name: "app", Value: "web", Type: "="}},
+		})
+		Expect(err).NotTo(HaveOccurred())
+		Expect(hits).To(HaveLen(5))
+		Expect(requests.Load()).To(BeNumerically(">", 0))
+	})
 })
 
 // produceSegmentLocal ingests and compacts a segment that stays local.

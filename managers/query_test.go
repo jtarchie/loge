@@ -117,9 +117,9 @@ var _ = Describe("Query", func() {
 		Expect(results[0].Timestamp).To(Equal(base + 2000))
 	})
 
-	It("filters by line over a compacted segment (trigram index path)", func() {
-		// Compact the three flush files into one indexed segment, then query by
-		// line so the line_search MATCH path is exercised.
+	It("filters by line over a compacted segment (LIKE scan)", func() {
+		// Compact the three flush files into one segment, then query by line so the
+		// LIKE scan path over a compacted segment is exercised (no FTS index).
 		compactor := loge.NewCompactor(outputPath, 2, 128, 0)
 		merged, err := compactor.Compact()
 		Expect(err).NotTo(HaveOccurred())

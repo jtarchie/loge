@@ -79,9 +79,13 @@ var _ = Describe("Compactor", func() {
 		Expect(err).NotTo(HaveOccurred())
 		Expect(labelCount).To(Equal(numFiles))
 
-		// The trigram line index is queryable and references every line.
+		// Segments carry no FTS index; keyword search is a plain LIKE scan.
+		var hasFTS int
+		Expect(dbClient.QueryRow("SELECT COUNT(*) FROM sqlite_master WHERE name = 'line_search'").Scan(&hasFTS)).To(Succeed())
+		Expect(hasFTS).To(Equal(0), "segments must not build an FTS index")
+
 		var matched int
-		err = dbClient.QueryRow("SELECT COUNT(*) FROM line_search WHERE line_search MATCH 'alpha'").Scan(&matched)
+		err = dbClient.QueryRow("SELECT COUNT(*) FROM streams WHERE line LIKE '%alpha%'").Scan(&matched)
 		Expect(err).NotTo(HaveOccurred())
 		Expect(matched).To(Equal(numFiles))
 

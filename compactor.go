@@ -46,6 +46,37 @@ func buildLineFilter(tx *sql.Tx) ([]byte, error) {
 	return managers.BuildLineFilter(hashes)
 }
 
+// buildLabelFilter scans the segment's distinct label key=value pairs (in the
+// open transaction) and builds a serialized filter used to skip the whole
+// segment for equality matchers it cannot satisfy.
+func buildLabelFilter(tx *sql.Tx) ([]byte, error) {
+	rows, err := tx.Query(`SELECT DISTINCT je.key, je.value FROM labels, json_each(labels.payload) je`)
+	if err != nil {
+		return nil, fmt.Errorf("could not read label pairs for filter: %w", err)
+	}
+	defer func() {
+		_ = rows.Close()
+	}()
+
+	hashes := map[uint64]struct{}{}
+
+	for rows.Next() {
+		var key, value string
+
+		if err := rows.Scan(&key, &value); err != nil {
+			return nil, fmt.Errorf("could not scan label pair: %w", err)
+		}
+
+		managers.AddLabelPairHash(key, value, hashes)
+	}
+
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("could not read label pairs: %w", err)
+	}
+
+	return managers.BuildLabelFilter(hashes)
+}
+
 const (
 	// defaultCompactMinFiles is the number of small flush files that must
 	// accumulate before a compaction pass merges them.
@@ -247,23 +278,32 @@ func (c *Compactor) merge(sources []string) error {
 		return fmt.Errorf("could not build line filter: %w", err)
 	}
 
+	// Build a filter of the segment's exact label key=value pairs so equality
+	// matchers can skip this whole segment when it holds no matching stream.
+	labelFilter, err := buildLabelFilter(transaction)
+	if err != nil {
+		return fmt.Errorf("could not build label filter: %w", err)
+	}
+
 	if _, err := transaction.Exec(
-		`INSERT INTO metadata (key, value) VALUES ('minTimestamp', ?), ('maxTimestamp', ?), ('lineFilter', ?);`,
-		minTimestamp, maxTimestamp, base64.StdEncoding.EncodeToString(lineFilter),
+		`INSERT INTO metadata (key, value) VALUES ('minTimestamp', ?), ('maxTimestamp', ?), ('lineFilter', ?), ('labelFilter', ?);`,
+		minTimestamp, maxTimestamp,
+		base64.StdEncoding.EncodeToString(lineFilter),
+		base64.StdEncoding.EncodeToString(labelFilter),
 	); err != nil {
 		return fmt.Errorf("could not write segment metadata: %w", err)
 	}
 
-	// Build the heavy indexes once for the whole segment. idx_streams_timestamp
-	// backs the time-range filter and the ORDER BY timestamp DESC LIMIT; no read
-	// path filters streams by label_id (the query drives from streams and reaches
-	// labels by primary key), so an index on label_id would be pure dead weight.
-	if _, err := transaction.Exec(`
-		CREATE INDEX idx_streams_timestamp ON streams(timestamp);
-		CREATE VIRTUAL TABLE line_search USING fts5(line, content='', columnsize=0, tokenize="trigram");
-		INSERT INTO line_search(rowid, line) SELECT id, line FROM streams;
-	`); err != nil {
-		return fmt.Errorf("could not build segment indexes: %w", err)
+	// Build the one index the read path needs: idx_streams_timestamp backs the
+	// time-range filter and the ORDER BY timestamp DESC LIMIT. No FTS index is
+	// built — benchmarks showed a trigram index costs ~3.3x the segment size yet
+	// loses to a plain LIKE scan on the common/recent/time-bounded queries that
+	// dominate (the timestamp-ordered scan short-circuits at LIMIT, while FTS must
+	// materialize every match then sort); the binary-fuse line filter already
+	// prunes whole segments that cannot contain a keyword. No label_id index
+	// either: the query drives from streams and reaches labels by primary key.
+	if _, err := transaction.Exec(`CREATE INDEX idx_streams_timestamp ON streams(timestamp);`); err != nil {
+		return fmt.Errorf("could not build segment index: %w", err)
 	}
 
 	if err := transaction.Commit(); err != nil {

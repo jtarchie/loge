@@ -476,7 +476,8 @@ func (c *ServeCmd) Run() error {
 		}
 
 		// Cold tier: the remote segments overlapping the window that the trigram
-		// filter cannot rule out — presigned for the client to scan directly.
+		// and label filters cannot rule out — presigned for the client to scan
+		// directly.
 		segments, err := catalog.Overlapping(request.Start, request.End)
 		if err != nil {
 			return fmt.Errorf("could not prune segments: %w", err)
@@ -490,6 +491,10 @@ func (c *ServeCmd) Run() error {
 			}
 
 			if request.Line != "" && !managers.LineFilterMayContain(segment.LineFilter, request.Line) {
+				continue
+			}
+
+			if !managers.LabelFilterAllows(segment.LabelFilter, request.Matchers) {
 				continue
 			}
 

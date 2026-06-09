@@ -36,6 +36,7 @@ type SegmentMeta struct {
 	SealedAt     int64    `db:"sealed_at"`
 	UploadedAt   int64    `db:"uploaded_at"`
 	LineFilter   []byte   `db:"line_filter"`
+	LabelFilter  []byte   `db:"label_filter"`
 	LabelKeys    []string `db:"-"`
 }
 
@@ -83,7 +84,8 @@ func OpenCatalog(dir string) (*Catalog, error) {
 			label_keys    TEXT NOT NULL DEFAULT '[]',
 			sealed_at     INTEGER NOT NULL,
 			uploaded_at   INTEGER NOT NULL DEFAULT 0,
-			line_filter   BLOB
+			line_filter   BLOB,
+			label_filter  BLOB
 		) STRICT;
 
 		CREATE INDEX IF NOT EXISTS idx_segments_maxts ON segments(max_timestamp);
@@ -93,9 +95,10 @@ func OpenCatalog(dir string) (*Catalog, error) {
 		return nil, fmt.Errorf("could not initialize catalog: %w", err)
 	}
 
-	// Add line_filter to catalogs created before it existed (idempotent; the
+	// Add filter columns to catalogs created before they existed (idempotent; the
 	// error on an already-migrated catalog is the expected duplicate-column one).
 	_, _ = db.Exec(`ALTER TABLE segments ADD COLUMN line_filter BLOB`)
+	_, _ = db.Exec(`ALTER TABLE segments ADD COLUMN label_filter BLOB`)
 
 	return &Catalog{db: db}, nil
 }
@@ -125,8 +128,8 @@ func (c *Catalog) Upsert(meta SegmentMeta) error {
 
 	_, err := c.db.Exec(`
 		INSERT INTO segments
-			(id, location, local_path, remote_url, min_timestamp, max_timestamp, row_count, label_keys, sealed_at, uploaded_at, line_filter)
-		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+			(id, location, local_path, remote_url, min_timestamp, max_timestamp, row_count, label_keys, sealed_at, uploaded_at, line_filter, label_filter)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 		ON CONFLICT(id) DO UPDATE SET
 			location = excluded.location,
 			local_path = excluded.local_path,
@@ -137,9 +140,10 @@ func (c *Catalog) Upsert(meta SegmentMeta) error {
 			label_keys = excluded.label_keys,
 			sealed_at = excluded.sealed_at,
 			uploaded_at = excluded.uploaded_at,
-			line_filter = excluded.line_filter;
+			line_filter = excluded.line_filter,
+			label_filter = excluded.label_filter;
 	`, meta.ID, meta.Location, meta.LocalPath, meta.RemoteURL,
-		meta.MinTimestamp, meta.MaxTimestamp, meta.RowCount, labelKeys, meta.SealedAt, meta.UploadedAt, meta.LineFilter)
+		meta.MinTimestamp, meta.MaxTimestamp, meta.RowCount, labelKeys, meta.SealedAt, meta.UploadedAt, meta.LineFilter, meta.LabelFilter)
 	if err != nil {
 		return fmt.Errorf("could not upsert segment %q: %w", meta.ID, err)
 	}
@@ -444,12 +448,20 @@ func readSegmentMeta(client *sql.DB, meta *SegmentMeta) error {
 
 	meta.LabelKeysRaw = string(encoded)
 
-	// The trigram line filter (if the segment has one) is base64 in metadata.
-	// Older segments predate it; a missing key is not an error.
+	// The trigram line filter and the label key=value filter (if present) are
+	// base64 in metadata. Older segments predate them; a missing key is not an
+	// error.
 	var encodedFilter string
 	if err := client.QueryRow(`SELECT value FROM metadata WHERE key = 'lineFilter'`).Scan(&encodedFilter); err == nil && encodedFilter != "" {
 		if decoded, derr := base64.StdEncoding.DecodeString(encodedFilter); derr == nil {
 			meta.LineFilter = decoded
+		}
+	}
+
+	var encodedLabelFilter string
+	if err := client.QueryRow(`SELECT value FROM metadata WHERE key = 'labelFilter'`).Scan(&encodedLabelFilter); err == nil && encodedLabelFilter != "" {
+		if decoded, derr := base64.StdEncoding.DecodeString(encodedLabelFilter); derr == nil {
+			meta.LabelFilter = decoded
 		}
 	}
 

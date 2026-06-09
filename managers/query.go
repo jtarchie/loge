@@ -73,7 +73,7 @@ func (m *Local) Query(ctx context.Context, req QueryRequest) ([]QueryEntry, erro
 		return nil, err
 	}
 
-	sources, err := m.sources(req.Start, req.End, req.Line, req.LocalOnly)
+	sources, err := m.sources(req.Start, req.End, req.Line, req.Matchers, req.LocalOnly)
 	if err != nil {
 		return nil, err
 	}
@@ -137,16 +137,11 @@ func (m *Local) queryOver(
 			}
 		}
 
-		// Use the trigram line index on LOCAL segments only — random reads are
-		// cheap on SSD. On remote (S3) segments the index is a pessimization:
-		// each B-tree probe is an HTTP round-trip, so a keyword query traverses
-		// the index over the network and is orders of magnitude slower than a
-		// sequential LIKE scan (which reads large contiguous chunks). Remote
-		// segments therefore fall back to LIKE only; the catalog filter has
-		// already skipped segments that cannot contain the keyword.
-		useLineIndex := req.Line != "" && len(req.Line) >= 3 && !isHTTP(src.dsn) && m.hasLineSearch(ctx, src.dsn, client)
-
-		sqlText, args := buildQuery(req, limit, useLineIndex)
+		// Keyword queries scan with LIKE (no FTS index exists). The timestamp
+		// index orders the scan newest-first and it stops at LIMIT, and the
+		// catalog line filter has already skipped segments that cannot contain
+		// the keyword — so a segment is only scanned when it may match.
+		sqlText, args := buildQuery(req, limit)
 
 		var rows []queryRow
 		if err := sqlscan.Select(ctx, client, &rows, sqlText, args...); err != nil {
@@ -196,25 +191,6 @@ func (m *Local) queryOver(
 	return results
 }
 
-// hasLineSearch reports whether a file has the trigram line_search index,
-// caching the (immutable) answer per file.
-func (m *Local) hasLineSearch(ctx context.Context, filename string, client *sql.DB) bool {
-	if cached, ok := m.lineSearch.Load(filename); ok {
-		return cached.(bool)
-	}
-
-	var count int
-
-	err := client.QueryRowContext(ctx,
-		`SELECT COUNT(*) FROM sqlite_master WHERE type = 'table' AND name = 'line_search'`,
-	).Scan(&count)
-
-	has := err == nil && count > 0
-	m.lineSearch.Store(filename, has)
-
-	return has
-}
-
 // fileOverlaps reports whether a file's stored [minTimestamp, maxTimestamp]
 // bounds overlap the requested [start, end] window (0 meaning unbounded). If
 // the bounds cannot be read it conservatively reports an overlap so the file
@@ -247,12 +223,12 @@ func fileOverlaps(ctx context.Context, client *sql.DB, start, end int64) (bool, 
 }
 
 // buildQuery assembles the per-file SQL and its arguments. Each file returns at
-// most limit rows (newest first); the caller merges across files. When
-// useLineIndex is set — local segments only — the trigram line_search index is
-// joined in to accelerate the line filter; the literal LIKE always runs as the
-// exact filter so correctness never depends on the index. Remote segments run
-// LIKE-only (useLineIndex is false for them: see Query).
-func buildQuery(req QueryRequest, limit int, useLineIndex bool) (string, []any) {
+// most limit rows (newest first); the caller merges across files. Keyword
+// filtering is a literal LIKE: there is no FTS index (it was retired for size,
+// and a timestamp-ordered LIKE scan that short-circuits at LIMIT beats it on the
+// common/recent queries), and the catalog line filter has already pruned
+// segments that cannot contain the keyword.
+func buildQuery(req QueryRequest, limit int) (string, []any) {
 	var sb strings.Builder
 
 	sb.WriteString(`SELECT s.timestamp AS timestamp, s.line AS line, json(l.payload) AS labels
@@ -260,16 +236,7 @@ func buildQuery(req QueryRequest, limit int, useLineIndex bool) (string, []any) 
 
 	args := make([]any, 0, len(req.Matchers)+4)
 
-	if useLineIndex {
-		sb.WriteString(" JOIN line_search ON line_search.rowid = s.id")
-	}
-
 	sb.WriteString(" WHERE 1 = 1")
-
-	if useLineIndex {
-		sb.WriteString(" AND line_search MATCH ?")
-		args = append(args, `"`+strings.ReplaceAll(req.Line, `"`, `""`)+`"`)
-	}
 
 	if req.Start != 0 {
 		sb.WriteString(" AND s.timestamp >= ?")

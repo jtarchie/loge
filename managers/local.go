@@ -33,7 +33,6 @@ type Local struct {
 	vfsName     string
 	concurrency int
 	noWatcher   bool
-	lineSearch  sync.Map // dsn -> bool: whether the source has the line_search index
 }
 
 // Option configures a Local manager.
@@ -107,9 +106,8 @@ func NewLocal(outputPath string, opts ...Option) (*Local, error) {
 		local.watcher = watcher
 	}
 
-	cache, err := lru.NewWithEvict[string, *sql.DB](defaultCachedDBs, func(dsn string, client *sql.DB) {
+	cache, err := lru.NewWithEvict[string, *sql.DB](defaultCachedDBs, func(_ string, client *sql.DB) {
 		_ = client.Close()
-		local.lineSearch.Delete(dsn)
 	})
 	if err != nil {
 		return nil, fmt.Errorf("could not start cache: %w", err)
@@ -168,9 +166,11 @@ func (m *Local) watcherSources() []querySource {
 // unbounded): local flush files from the watcher plus catalog segments pruned
 // to the window (resolved to a local copy when present, else their remote URL).
 // When line is set, catalog segments whose trigram filter proves they cannot
-// contain it are pruned too — with no file/S3 read. When localOnly is set,
-// remote (S3) catalog segments are skipped so only the hot tier is scanned.
-func (m *Local) sources(start, end int64, line string, localOnly bool) ([]querySource, error) {
+// contain it are pruned too — with no file/S3 read. Likewise, catalog segments
+// whose label filter proves they hold no stream matching an equality matcher are
+// pruned. When localOnly is set, remote (S3) catalog segments are skipped so only
+// the hot tier is scanned.
+func (m *Local) sources(start, end int64, line string, matchers []Matcher, localOnly bool) ([]querySource, error) {
 	var sources []querySource
 
 	// Local flush files are tracked by the watcher. Prune them by their
@@ -212,6 +212,12 @@ func (m *Local) sources(start, end int64, line string, localOnly bool) ([]queryS
 				continue
 			}
 
+			// Likewise skip segments whose label filter proves they hold no stream
+			// matching an equality matcher — zero file/S3 reads.
+			if !LabelFilterAllows(segment.LabelFilter, matchers) {
+				continue
+			}
+
 			dsn := segment.RemoteURL
 
 			if segment.LocalPath != "" {
@@ -229,6 +235,22 @@ func (m *Local) sources(start, end int64, line string, localOnly bool) ([]queryS
 	}
 
 	return sources, nil
+}
+
+// LabelFilterAllows reports whether a segment with the given label filter could
+// satisfy every equality matcher. Only "="/"" matchers prune (the filter holds
+// exact key=value pairs); "!=" and regex matchers cannot and are ignored here.
+func LabelFilterAllows(blob []byte, matchers []Matcher) bool {
+	for _, matcher := range matchers {
+		switch matcher.Type {
+		case "", "=":
+			if !LabelFilterMayContain(blob, matcher.Name, matcher.Value) {
+				return false
+			}
+		}
+	}
+
+	return true
 }
 
 // forEach runs fn over sources with bounded concurrency. A failure on one

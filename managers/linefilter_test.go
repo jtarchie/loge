@@ -45,3 +45,41 @@ func TestLineFilter(t *testing.T) {
 		t.Error("nil filter must pass (no pruning possible)")
 	}
 }
+
+func TestLabelFilter(t *testing.T) {
+	t.Parallel()
+
+	set := map[uint64]struct{}{}
+	managers.AddLabelPairHash("app", "api", set)
+	managers.AddLabelPairHash("env", "prod", set)
+	managers.AddLabelPairHash("pod", "pod-7", set)
+
+	blob, err := managers.BuildLabelFilter(set)
+	if err != nil {
+		t.Fatalf("BuildLabelFilter: %v", err)
+	}
+
+	if len(blob) == 0 {
+		t.Fatal("expected a non-empty filter")
+	}
+
+	// No false negatives: every present pair must pass.
+	for _, p := range [][2]string{{"app", "api"}, {"env", "prod"}, {"pod", "pod-7"}} {
+		if !managers.LabelFilterMayContain(blob, p[0], p[1]) {
+			t.Errorf("present pair %s=%s was wrongly pruned (false negative)", p[0], p[1])
+		}
+	}
+
+	// Exact match: a present key with a different value is pruned, and the match
+	// is case-sensitive (unlike the line filter).
+	for _, p := range [][2]string{{"app", "web"}, {"env", "staging"}, {"app", "API"}, {"missing", "x"}} {
+		if managers.LabelFilterMayContain(blob, p[0], p[1]) {
+			t.Errorf("absent pair %s=%s should be pruned", p[0], p[1])
+		}
+	}
+
+	// No filter: cannot prune.
+	if !managers.LabelFilterMayContain(nil, "app", "api") {
+		t.Error("nil filter must pass (no pruning possible)")
+	}
+}

@@ -194,7 +194,7 @@ var _ = Describe("Uploader", func() {
 		Expect(results[0].Labels).To(HaveKeyWithValue("app", "svc"))
 	})
 
-	It("uploads an FTS-stripped cold copy that still serves keyword (LIKE) queries", func() {
+	It("uploads the segment as-is (no FTS index anywhere) and serves keyword (LIKE) queries", func() {
 		dir := GinkgoT().TempDir()
 		remoteDir := GinkgoT().TempDir()
 
@@ -235,9 +235,9 @@ var _ = Describe("Uploader", func() {
 		Expect(segments).To(HaveLen(1))
 		segmentID := segments[0].ID
 
-		// The local (hot) segment keeps its FTS index.
+		// Segments carry no FTS index on either tier (it was retired for size).
 		localPath := segments[0].LocalPath
-		Expect(tableExists(localPath, "line_search")).To(BeTrue(), "local segment keeps FTS")
+		Expect(tableExists(localPath, "line_search")).To(BeFalse(), "segments carry no FTS index")
 
 		store := &fakeStore{remoteDir: remoteDir, baseURL: server.URL}
 		uploader := loge.NewUploader(dir, catalog, store,
@@ -247,11 +247,11 @@ var _ = Describe("Uploader", func() {
 		Expect(err).NotTo(HaveOccurred())
 		Expect(rotated).To(Equal(1))
 
-		// The uploaded cold copy has NO FTS index, but keeps the data, the
-		// timestamp index, and the metadata bounds.
+		// The uploaded cold copy is byte-identical in shape: no FTS index, with
+		// the data, the timestamp index, and the metadata bounds.
 		remotePath := filepath.Join(remoteDir, "loge", segmentID)
 		Expect(remotePath).To(BeAnExistingFile())
-		Expect(tableExists(remotePath, "line_search")).To(BeFalse(), "cold copy must be FTS-stripped")
+		Expect(tableExists(remotePath, "line_search")).To(BeFalse(), "cold copy has no FTS index")
 		Expect(tableExists(remotePath, "idx_streams_timestamp")).To(BeTrue(), "cold copy keeps the timestamp index")
 		Expect(rowCount(remotePath, "streams")).To(Equal(4))
 		Expect(rowCount(remotePath, "labels")).To(Equal(4))

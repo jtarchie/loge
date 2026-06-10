@@ -139,6 +139,12 @@ type ServeCmd struct {
 	CheckpointInterval time.Duration `default:"2s"    help:"how often to fsync new segments and prune the write-ahead log"`
 	QueryConcurrency   int           `default:"8"     help:"max segments a query opens in parallel"`
 
+	// Profiling (opt-in). The pprof listener binds to loopback only because
+	// heap profiles can expose log contents.
+	PprofPort          int `name:"pprof-port"           default:"0" help:"serve net/http/pprof on 127.0.0.1:<port> (0 disables)"`
+	PprofBlockRate     int `name:"pprof-block-rate"     default:"0" help:"runtime.SetBlockProfileRate sampling rate in ns (0 disables block profiling)"`
+	PprofMutexFraction int `name:"pprof-mutex-fraction" default:"0" help:"runtime.SetMutexProfileFraction: sample 1/N mutex contention events (0 disables)"`
+
 	// S3 tiered storage (rotate old segments to S3, read them back over HTTP).
 	// Leave --s3-bucket empty to keep everything local.
 	S3Bucket         string        `name:"s3-bucket"            env:"BUCKET_NAME"         default:""      help:"S3 bucket to rotate old segments into (empty disables S3 tiering)"`
@@ -204,6 +210,12 @@ func (c *ServeCmd) Run() error {
 	// Create a context that will be cancelled on shutdown signal
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
+
+	setProfileRates(c.PprofBlockRate, c.PprofMutexFraction)
+
+	if c.PprofPort > 0 {
+		startPprofServer(ctx, c.PprofPort)
+	}
 
 	// Optional write-ahead log + checkpointer: durably record (and fsync) each
 	// payload before acknowledging it, replay any segments left by a previous

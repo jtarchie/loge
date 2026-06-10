@@ -50,13 +50,14 @@ tasks:
         lsof -ti:6500 | xargs kill -9 2>/dev/null || true
         sleep 1
         /tmp/loge-bench --port 6500 --payload-size 100000 --buckets 2 &
-        SERVER_PID=$!
-        echo "Started server with PID $SERVER_PID"
-        
+
         echo "Waiting for server to be ready..."
         for i in $(seq 1 30); do
           if nc -z localhost 6500 2>/dev/null; then
-            echo "Server is ready!"
+            # go-task's shell (mvdan/sh) reports job ids like "g1" for $! and
+            # has no kill builtin — use the port's real PID and /bin/kill.
+            SERVER_PID=$(lsof -ti:6500)
+            echo "Server is ready (PID $SERVER_PID)!"
             return 0
           fi
           if [ $i -eq 30 ]; then
@@ -71,10 +72,10 @@ tasks:
       stop_server() {
         if [ -n "$SERVER_PID" ]; then
           echo "Stopping server (PID $SERVER_PID) and waiting for flush..."
-          kill -TERM $SERVER_PID 2>/dev/null || true
+          /bin/kill -TERM $SERVER_PID 2>/dev/null || true
           # Wait for process to exit with timeout
           for i in $(seq 1 60); do
-            if ! kill -0 $SERVER_PID 2>/dev/null; then
+            if ! /bin/kill -0 $SERVER_PID 2>/dev/null; then
               echo "Server stopped and flushed."
               SERVER_PID=""
               return 0
@@ -82,7 +83,7 @@ tasks:
             sleep 1
           done
           echo "Server did not exit within 60s, force killing..."
-          kill -9 $SERVER_PID 2>/dev/null || true
+          /bin/kill -9 $SERVER_PID 2>/dev/null || true
           sleep 1
         fi
         SERVER_PID=""
@@ -134,13 +135,14 @@ tasks:
         lsof -ti:6500 | xargs kill -9 2>/dev/null || true
         sleep 1
         /tmp/loge-bench --port 6500 --payload-size 100000 --buckets 2 --drop-on-backpressure &
-        SERVER_PID=$!
-        echo "Started server (drop mode) with PID $SERVER_PID"
-        
+
         echo "Waiting for server to be ready..."
         for i in $(seq 1 30); do
           if nc -z localhost 6500 2>/dev/null; then
-            echo "Server is ready!"
+            # go-task's shell (mvdan/sh) reports job ids like "g1" for $! and
+            # has no kill builtin — use the port's real PID and /bin/kill.
+            SERVER_PID=$(lsof -ti:6500)
+            echo "Server is ready (PID $SERVER_PID)!"
             return 0
           fi
           if [ $i -eq 30 ]; then
@@ -155,10 +157,10 @@ tasks:
       stop_server() {
         if [ -n "$SERVER_PID" ]; then
           echo "Stopping server (PID $SERVER_PID)..."
-          kill -TERM $SERVER_PID 2>/dev/null || true
+          /bin/kill -TERM $SERVER_PID 2>/dev/null || true
           # Wait for process to exit with timeout
           for i in $(seq 1 60); do
-            if ! kill -0 $SERVER_PID 2>/dev/null; then
+            if ! /bin/kill -0 $SERVER_PID 2>/dev/null; then
               echo "Server stopped."
               SERVER_PID=""
               return 0
@@ -166,7 +168,7 @@ tasks:
             sleep 1
           done
           echo "Server did not exit within 60s, force killing..."
-          kill -9 $SERVER_PID 2>/dev/null || true
+          /bin/kill -9 $SERVER_PID 2>/dev/null || true
           sleep 1
         fi
         SERVER_PID=""
@@ -232,3 +234,154 @@ tasks:
     desc: 'Destroy the Fly app and its volume (DESTRUCTIVE)'
     cmds:
     - fly apps destroy loge-bench
+  bench:save:
+    desc: 'Save unit benchmark results as the local baseline for bench:diff (var: COUNT)'
+    cmds:
+    - mkdir -p profiles/bench
+    - go test -tags fts5 -run '^$' -bench . -benchmem -count {{.COUNT | default 6}} ./... | tee profiles/bench/baseline.txt
+    - go test -C worker -run '^$' -bench . -benchmem -count {{.COUNT | default 6}} ./... | tee -a profiles/bench/baseline.txt
+  bench:diff:
+    desc: 'Re-run unit benchmarks and compare against the saved baseline with benchstat (var: COUNT)'
+    cmds:
+    - go test -tags fts5 -run '^$' -bench . -benchmem -count {{.COUNT | default 6}} ./... | tee profiles/bench/current.txt
+    - go test -C worker -run '^$' -bench . -benchmem -count {{.COUNT | default 6}} ./... | tee -a profiles/bench/current.txt
+    - go run golang.org/x/perf/cmd/benchstat@latest profiles/bench/baseline.txt profiles/bench/current.txt
+  profile:ingest:
+    desc: 'Capture cpu/heap/allocs/goroutine/mutex/block profiles under loadgen ingest (vars: RATE, DURATION, SECONDS)'
+    cmds:
+    - go build -tags fts5 -o /tmp/loge-bench ./loge/main.go
+    - go build -o /tmp/loge-loadgen ./cmd/loge-loadgen
+    - |
+      OUT="$(pwd)/profiles/ingest/$(date +%Y%m%d-%H%M%S)"
+      mkdir -p "$OUT"
+      rm -Rf tmp/
+      # Kill any existing processes on port 6500
+      lsof -ti:6500 | xargs kill -9 2>/dev/null || true
+      sleep 1
+      # Fast compaction so trigram/filter building fires inside the CPU window.
+      /tmp/loge-bench --port 6500 --payload-size 100000 --buckets 2 \
+        --compact-interval 5s --compact-min-files 4 \
+        --pprof-port 6060 --pprof-block-rate 10000 --pprof-mutex-fraction 100 &
+
+      echo "Waiting for server to be ready..."
+      for i in $(seq 1 30); do
+        nc -z localhost 6500 2>/dev/null && break
+        if [ $i -eq 30 ]; then
+          echo "Server failed to start within 30 seconds"
+          lsof -ti:6500 | xargs kill -9 2>/dev/null || true
+          exit 1
+        fi
+        sleep 1
+      done
+      # go-task's shell (mvdan/sh) reports job ids like "g1" for $! and has no
+      # kill builtin — use the port's real PID and /bin/kill explicitly.
+      SERVER_PID=$(lsof -ti:6500)
+      trap '/bin/kill -TERM $SERVER_PID 2>/dev/null || true' EXIT
+
+      /tmp/loge-loadgen --target http://localhost:6500 \
+        --rate {{.RATE | default 8000}} --duration {{.DURATION | default "60s"}} &
+      LOAD_PID=$!
+      sleep 5  # let load ramp before sampling
+
+      echo "Capturing CPU profile ({{.SECONDS | default 30}}s)..."
+      curl -s -o "$OUT/cpu.pprof" "http://localhost:6060/debug/pprof/profile?seconds={{.SECONDS | default 30}}"
+      for p in heap allocs goroutine mutex block; do
+        curl -s -o "$OUT/$p.pprof" "http://localhost:6060/debug/pprof/$p"
+      done
+
+      wait $LOAD_PID || true
+      /bin/kill -TERM $SERVER_PID 2>/dev/null || true
+      for i in $(seq 1 60); do
+        /bin/kill -0 $SERVER_PID 2>/dev/null || break
+        sleep 1
+      done
+      /bin/kill -9 $SERVER_PID 2>/dev/null || true
+      echo "profiles written to $OUT"
+      go tool pprof -top -nodecount 10 "$OUT/cpu.pprof"
+  profile:query:
+    desc: 'Seed data with loadgen, then capture profiles under k6 query load (vars: SEED_RATE, SEED_DURATION, SECONDS)'
+    cmds:
+    - go build -tags fts5 -o /tmp/loge-bench ./loge/main.go
+    - go build -o /tmp/loge-loadgen ./cmd/loge-loadgen
+    - |
+      OUT="$(pwd)/profiles/query/$(date +%Y%m%d-%H%M%S)"
+      mkdir -p "$OUT"
+      rm -Rf tmp/
+      # Kill any existing processes on port 6500
+      lsof -ti:6500 | xargs kill -9 2>/dev/null || true
+      sleep 1
+      /tmp/loge-bench --port 6500 --payload-size 100000 --buckets 2 \
+        --compact-interval 5s --compact-min-files 4 \
+        --pprof-port 6060 --pprof-block-rate 10000 --pprof-mutex-fraction 100 &
+
+      echo "Waiting for server to be ready..."
+      for i in $(seq 1 30); do
+        nc -z localhost 6500 2>/dev/null && break
+        if [ $i -eq 30 ]; then
+          echo "Server failed to start within 30 seconds"
+          lsof -ti:6500 | xargs kill -9 2>/dev/null || true
+          exit 1
+        fi
+        sleep 1
+      done
+      # go-task's shell (mvdan/sh) reports job ids like "g1" for $! and has no
+      # kill builtin — use the port's real PID and /bin/kill explicitly.
+      SERVER_PID=$(lsof -ti:6500)
+      trap '/bin/kill -TERM $SERVER_PID 2>/dev/null || true' EXIT
+
+      echo "Seeding data..."
+      /tmp/loge-loadgen --target http://localhost:6500 \
+        --rate {{.SEED_RATE | default 8000}} --duration {{.SEED_DURATION | default "30s"}}
+      # Wait for flush + compaction so queries hit real segments.
+      for i in $(seq 1 30); do
+        TOTAL=$(curl -s http://localhost:6500/api/v1/stats | grep -o '"segments_total":[0-9]*' | cut -d: -f2)
+        [ "${TOTAL:-0}" -gt 0 ] && break
+        sleep 2
+      done
+      echo "Catalog has ${TOTAL:-0} segments; starting query load..."
+
+      BASE=http://localhost:6500 DURATION=45s k6 run benchmark/query/hot.js &
+      K6_PID=$!
+      sleep 3
+      echo "Capturing CPU profile ({{.SECONDS | default 30}}s)..."
+      curl -s -o "$OUT/cpu.pprof" "http://localhost:6060/debug/pprof/profile?seconds={{.SECONDS | default 30}}"
+      for p in heap allocs goroutine mutex block; do
+        curl -s -o "$OUT/$p.pprof" "http://localhost:6060/debug/pprof/$p"
+      done
+      wait $K6_PID || true
+
+      BASE=http://localhost:6500 k6 run benchmark/query/keyword.js || true
+
+      /bin/kill -TERM $SERVER_PID 2>/dev/null || true
+      for i in $(seq 1 60); do
+        /bin/kill -0 $SERVER_PID 2>/dev/null || break
+        sleep 1
+      done
+      /bin/kill -9 $SERVER_PID 2>/dev/null || true
+      echo "profiles written to $OUT"
+      go tool pprof -top -nodecount 10 "$OUT/cpu.pprof"
+  profile:bench:
+    desc: 'Run one Go benchmark with cpu+mem profiles (vars: BENCH, DIR, BENCHTIME)'
+    cmds:
+    - |
+      OUT="$(pwd)/profiles/bench/$(date +%Y%m%d-%H%M%S)"
+      mkdir -p "$OUT"
+      # -C: DIR is a module/package dir (".", "worker"); one benchmark per run
+      # so frames from other benchmarks don't pollute the profile.
+      go test -C {{.DIR | default "."}} -tags fts5 -run '^$' \
+        -bench '{{.BENCH | default "BenchmarkLocalManager"}}' \
+        -benchmem -benchtime {{.BENCHTIME | default "5s"}} \
+        -cpuprofile "$OUT/cpu.pprof" -memprofile "$OUT/mem.pprof" -o "$OUT/bench.test" .
+      echo "profiles written to $OUT"
+      go tool pprof -top -nodecount 10 "$OUT/bench.test" "$OUT/cpu.pprof"
+  profile:web:
+    desc: 'Open the newest captured profile in go tool pprof web UI (var: PROFILE to override)'
+    cmds:
+    - |
+      PROFILE='{{.PROFILE | default ""}}'
+      if [ -z "$PROFILE" ]; then
+        PROFILE=$(ls -t profiles/*/*/cpu.pprof 2>/dev/null | head -1)
+      fi
+      [ -n "$PROFILE" ] || { echo "no profiles found under profiles/"; exit 1; }
+      echo "opening $PROFILE"
+      go tool pprof -http=: "$PROFILE"

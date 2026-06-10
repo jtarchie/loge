@@ -46,6 +46,42 @@ exercise cold reads and the rebuild.)
 
 ---
 
+## Profiling (pprof)
+
+The server exposes `net/http/pprof` on a **loopback-only** listener when started with
+`--pprof-port <port>` (off by default — heap profiles can expose log contents, so it
+never binds a public interface; on Fly use `fly proxy 6060:6060` to reach it).
+`--pprof-block-rate` / `--pprof-mutex-fraction` additionally enable block/mutex
+contention sampling — useful for the channel-based buckets and the query fan-out.
+
+Automated captures (timestamped output under `profiles/`, gitignored):
+
+```sh
+task profile:ingest                   # cpu/heap/allocs/goroutine/mutex/block under loadgen
+                                      # ingest + fast compaction (vars: RATE, DURATION, SECONDS)
+task profile:query                    # seed with loadgen, then capture under k6 hot.js query
+                                      # load (vars: SEED_RATE, SEED_DURATION, SECONDS)
+task profile:bench BENCH=BenchmarkBucketsParallelWithBackpressure   # go test -cpuprofile/-memprofile
+task profile:bench DIR=worker BENCH=BenchmarkEntries                # worker module benches
+task profile:web                      # open the newest cpu.pprof in the pprof web UI
+```
+
+Benchmark regression loop (local, benchstat-based):
+
+```sh
+task bench:save                       # write profiles/bench/baseline.txt (root + worker, -count 6)
+# ...make changes...
+task bench:diff                       # re-run and benchstat against the baseline
+```
+
+For the client-side (`--local`) search path, profile the sizebench harness directly:
+
+```sh
+go test -tags "fts5 sqlite_dbstat sizebench" -run TestQueryLatency -cpuprofile cpu.pprof
+```
+
+---
+
 ## Real-world run on Fly.io + Tigris
 
 ### 0. Prereqs

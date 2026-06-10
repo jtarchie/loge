@@ -205,3 +205,5 @@ dist
 tmp/
 # go-task fingerprint cache
 .task/
+# captured pprof profiles + benchstat baselines (task profile:*, bench:save)
+profiles/

@@ -3,6 +3,7 @@ package loge_test
 import (
 	"context"
 	"os"
+	"strconv"
 	"testing"
 	"time"
 
@@ -60,6 +61,92 @@ func BenchmarkLocalManager(b *testing.B) {
 			labels, _ := manager.Labels()
 			if len(labels) > 1000 {
 				b.Fatalf("something happened")
+			}
+		}
+	})
+}
+
+// BenchmarkLocalManagerQuery benchmarks the query path end to end across flush
+// files: SQL scan, label decode, regex filtering, and the newest-first merge.
+func BenchmarkLocalManagerQuery(b *testing.B) {
+	outputPath, err := os.MkdirTemp("", "")
+	if err != nil {
+		b.Fatalf("could not create directory: %s", err)
+	}
+	defer func() {
+		_ = os.RemoveAll(outputPath)
+	}()
+
+	manager, err := managers.NewLocal(outputPath)
+	if err != nil {
+		b.Fatalf("could not start manager: %s", err)
+	}
+	defer func() {
+		if err := manager.Close(); err != nil {
+			b.Fatalf("could not close manager: %s", err)
+		}
+	}()
+
+	buckets, err := loge.NewBuckets(context.Background(), 10, 100, outputPath, false)
+	if err != nil {
+		b.Fatalf("could not create buckets: %s", err)
+	}
+	defer func() {
+		_ = buckets.Close()
+	}()
+
+	// Bounded label cardinality with high-cardinality IDs in the line, the
+	// labeling model the realistic generator (cmd/loge-loadgen) uses.
+	for index := range 1_000 {
+		timestamp := strconv.FormatInt(time.Now().UnixNano(), 10)
+		payload := loge.Payload{
+			Streams: loge.Streams{
+				{
+					Stream: loge.Stream{
+						"app":     "app_" + strconv.Itoa(index%6),
+						"env":     "production",
+						"host":    "host_" + strconv.Itoa(index%20),
+						"level":   "info",
+						"service": "api",
+					},
+					Values: loge.Values{
+						{timestamp, "GET /api/v1/orders 200 trace_id=" + timestamp},
+					},
+				},
+			},
+		}
+
+		_, valid := payload.Valid()
+		if !valid {
+			b.Fatalf("payload not valid %d", index)
+		}
+
+		if err := buckets.Append(payload); err != nil {
+			b.Fatalf("could not append payload: %s", err)
+		}
+	}
+
+	// warmup: wait until every line has flushed and is queryable
+	for range 10_000 {
+		entries, err := manager.Query(context.Background(), managers.QueryRequest{Limit: 5000})
+		if err == nil && len(entries) == 1_000 {
+			break
+		}
+
+		time.Sleep(time.Millisecond)
+	}
+
+	b.ResetTimer() // Start timing now.
+
+	b.RunParallel(func(pb *testing.PB) {
+		for pb.Next() {
+			entries, err := manager.Query(context.Background(), managers.QueryRequest{Limit: 100})
+			if err != nil {
+				b.Fatalf("could not query: %s", err)
+			}
+
+			if len(entries) != 100 {
+				b.Fatalf("expected 100 entries, got %d", len(entries))
 			}
 		}
 	})

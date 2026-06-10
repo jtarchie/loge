@@ -3,7 +3,6 @@ package managers
 import (
 	"context"
 	"database/sql"
-	"encoding/json"
 	"fmt"
 	"log/slog"
 	"regexp"
@@ -12,6 +11,7 @@ import (
 	"sync"
 
 	"github.com/georgysavva/scany/v2/sqlscan"
+	"github.com/goccy/go-json"
 )
 
 const (
@@ -50,12 +50,19 @@ type QueryEntry struct {
 	Labels    map[string]string `json:"labels"`
 }
 
-// queryRow is the per-row scan target for the SQL query.
-type queryRow struct {
-	Timestamp int64  `db:"timestamp"`
-	Line      string `db:"line"`
-	Labels    string `db:"labels"`
+// rawEntry carries a scanned row until the post-merge label decode. labels
+// holds the raw JSON payload; decoded is only populated when regex matchers
+// forced an early decode (the map is then reused in the final result).
+type rawEntry struct {
+	timestamp int64
+	line      string
+	labels    string
+	decoded   map[string]string
 }
+
+// labelMapHint pre-sizes decoded label maps; streams typically carry a
+// handful of labels (the realistic generator emits five).
+const labelMapHint = 8
 
 // Query searches all known files for log lines matching req, pruning files
 // whose stored time bounds do not overlap the requested window, and returns
@@ -111,6 +118,10 @@ func (m *Local) QuerySources(ctx context.Context, req QueryRequest, dsns []strin
 // limit), applies the Go-side regex matchers, then merges the rows newest-first
 // and caps the merged set to limit. A failure on one source degrades the result
 // to the sources that succeeded rather than failing the whole query.
+//
+// Label JSON is decoded only for rows that survive the merge cap (each source
+// contributes up to limit rows but at most limit survive overall), except when
+// regex matchers need the labels up front to filter.
 func (m *Local) queryOver(
 	ctx context.Context,
 	req QueryRequest,
@@ -120,7 +131,7 @@ func (m *Local) queryOver(
 ) []QueryEntry {
 	var (
 		mu      sync.Mutex
-		results []QueryEntry
+		results []rawEntry
 	)
 
 	joinErr := m.forEach(sources, func(src querySource, client *sql.DB) error {
@@ -143,28 +154,40 @@ func (m *Local) queryOver(
 		// the keyword — so a segment is only scanned when it may match.
 		sqlText, args := buildQuery(req, limit)
 
-		var rows []queryRow
-		if err := sqlscan.Select(ctx, client, &rows, sqlText, args...); err != nil {
+		rows, err := client.QueryContext(ctx, sqlText, args...)
+		if err != nil {
 			return fmt.Errorf("could not query streams: %w", err)
 		}
+		defer func() {
+			_ = rows.Close()
+		}()
 
-		local := make([]QueryEntry, 0, len(rows))
+		var local []rawEntry
 
-		for _, row := range rows {
-			labels := map[string]string{}
-			if err := json.Unmarshal([]byte(row.Labels), &labels); err != nil {
-				return fmt.Errorf("could not decode labels: %w", err)
+		for rows.Next() {
+			var entry rawEntry
+			if err := rows.Scan(&entry.timestamp, &entry.line, &entry.labels); err != nil {
+				return fmt.Errorf("could not scan stream row: %w", err)
 			}
 
-			if !matchesRegex(labels, regexMatchers) {
-				continue
+			if len(regexMatchers) > 0 {
+				labels := make(map[string]string, labelMapHint)
+				if err := json.Unmarshal([]byte(entry.labels), &labels); err != nil {
+					return fmt.Errorf("could not decode labels: %w", err)
+				}
+
+				if !matchesRegex(labels, regexMatchers) {
+					continue
+				}
+
+				entry.decoded = labels
 			}
 
-			local = append(local, QueryEntry{
-				Timestamp: row.Timestamp,
-				Line:      row.Line,
-				Labels:    labels,
-			})
+			local = append(local, entry)
+		}
+
+		if err := rows.Err(); err != nil {
+			return fmt.Errorf("could not read streams: %w", err)
 		}
 
 		mu.Lock()
@@ -181,14 +204,36 @@ func (m *Local) queryOver(
 
 	// Merge across files: newest first, then cap to the requested limit.
 	sort.Slice(results, func(i, j int) bool {
-		return results[i].Timestamp > results[j].Timestamp
+		return results[i].timestamp > results[j].timestamp
 	})
 
 	if len(results) > limit {
 		results = results[:limit]
 	}
 
-	return results
+	// Decode labels for the surviving rows only (regex-filtered rows already
+	// carry their map). A row with corrupt labels is dropped, not the query.
+	entries := make([]QueryEntry, 0, len(results))
+
+	for _, row := range results {
+		labels := row.decoded
+		if labels == nil {
+			labels = make(map[string]string, labelMapHint)
+			if err := json.Unmarshal([]byte(row.labels), &labels); err != nil {
+				slog.Warn("could not decode labels", slog.String("error", err.Error()))
+
+				continue
+			}
+		}
+
+		entries = append(entries, QueryEntry{
+			Timestamp: row.timestamp,
+			Line:      row.line,
+			Labels:    labels,
+		})
+	}
+
+	return entries
 }
 
 // fileOverlaps reports whether a file's stored [minTimestamp, maxTimestamp]

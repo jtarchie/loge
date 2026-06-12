@@ -390,9 +390,28 @@ compaction **merge**. Profiling separated the two and only one had a SQLite-spec
 The live lift is modest because compaction is a **background** task — its CPU only intermittently
 competes with the continuous foreground flush+decode, so cutting it nudges the ceiling rather
 than moving it like the decode fix did. The local merge numbers are the cleaner measure of the
-change. Profiling also surfaced the next compaction-read hotspot: `buildLineFilter` still scans
-every line in Go to hash trigrams (the remaining ~9%); shrinking that, plus msgpack ingest for
-decode, are the open levers.
+change.
+
+### Run 6 — a foreground/background lesson (reverted)
+
+Run 5 pointed at `buildLineFilter` (compaction hashing every line's trigrams) as the next target.
+The attempt: hash each flush's trigrams **at flush time** (lines already in memory) and store the
+set, so compaction **unions** the per-flush sets instead of rebuilding them. Locally it looked
+great — compaction merge **~225 ms → ~93 ms (−59%)** and **130k → 2.7k allocs (−98%)**, flush only
+**+7%**.
+
+**On Fly it regressed the ceiling: 146k → 120k lines/s (−18%).** The profile showed why: on real
+log lines the trigram hashing is **~16% of CPU**, and moving it from background compaction to the
+**foreground flush** put it on the saturated hot path, directly competing with decode+insert for
+the two cores. The background compaction savings (real, but intermittent) didn't offset it. Total
+work went *down*; the ceiling went *down too*, because **where** the work runs matters more than
+how much of it there is once the box is CPU-bound. Reverted.
+
+Two corrections from this run: (1) the ~9% `SQLiteRows.Next` in Run 5 was **`buildLabelFilter`'s
+`json_each` scan**, not `buildLineFilter` — so the line-filter scan was never the cgo hotspot, its
+cost was the hashing. (2) Local "total work" benchmarks can mislead about the live ceiling; any
+ingest-path change has to be hammer-validated. The open levers remain msgpack ingest (decode ~14%)
+and `buildLabelFilter`, both to be done **without** shifting cost onto the foreground flush.
 
 ---
 

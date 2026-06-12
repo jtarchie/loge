@@ -53,6 +53,8 @@ type Buckets struct {
 	dropOnBackpressure bool
 	flushInterval      time.Duration
 	flushEncoderPool   *sync.Pool
+	flushWorkers       int
+	flushQueue         int
 	wal                *WAL
 	onDurable          func(filename string, seqs []uint64)
 }
@@ -107,6 +109,30 @@ func WithFlushCompressionName(name string) (BucketOption, error) {
 	}
 
 	return WithFlushCompression(level), nil
+}
+
+// WithFlushWorkers overrides the number of flush and compress worker goroutines.
+// They default to max(buckets/2, 2); a non-positive value keeps that default.
+// This is the main lever for flush throughput on a machine with more CPUs than
+// buckets/2, decoupling flush parallelism from the (memory-heavy) bucket count.
+func WithFlushWorkers(n int) BucketOption {
+	return func(b *Buckets) {
+		if n > 0 {
+			b.flushWorkers = n
+		}
+	}
+}
+
+// WithFlushQueue overrides the depth of the flush and compress job queues, which
+// default to the bucket count. A deeper queue absorbs ingest bursts before
+// backpressure engages, at the cost of memory; a non-positive value keeps the
+// default.
+func WithFlushQueue(n int) BucketOption {
+	return func(b *Buckets) {
+		if n > 0 {
+			b.flushQueue = n
+		}
+	}
 }
 
 // WithWAL makes Append durably log each payload (and assign it a sequence
@@ -208,7 +234,20 @@ func NewBuckets(
 		buckets.flushEncoderPool = betterEncoderPool
 	}
 
-	buckets.compressors = worker.NewWithContext(ctx, size, max(size/2, 2), func(_ int, job compressJob) {
+	// Flush + compress pool sizing. Both default to a function of the bucket
+	// count, but can be overridden so flush parallelism (workers) and burst
+	// absorption (queue depth) scale with CPUs/RAM independently of buckets.
+	flushWorkers := max(size/2, 2)
+	if buckets.flushWorkers > 0 {
+		flushWorkers = buckets.flushWorkers
+	}
+
+	flushQueue := size
+	if buckets.flushQueue > 0 {
+		flushQueue = buckets.flushQueue
+	}
+
+	buckets.compressors = worker.NewWithContext(ctx, flushQueue, flushWorkers, func(_ int, job compressJob) {
 		if err := compressWithPool(job.filename, buckets.flushEncoderPool); err != nil {
 			slog.Error("could not compress file", slog.String("filename", job.filename), slog.String("error", err.Error()))
 
@@ -222,7 +261,7 @@ func NewBuckets(
 		}
 	})
 
-	buckets.flushers = worker.NewWithContext(ctx, size, max(size/2, 2), func(index int, job flushJob) {
+	buckets.flushers = worker.NewWithContext(ctx, flushQueue, flushWorkers, func(index int, job flushJob) {
 		filename, err := flusher(job.payloads, outputPath, index)
 		if err != nil {
 			slog.Error("could not flush payloads", slog.Int("index", index), slog.String("error", err.Error()))

@@ -134,6 +134,8 @@ type ServeCmd struct {
 	DropOnBackpressure bool          `default:"false" help:"drop data instead of blocking when backpressure occurs"`
 	FlushInterval      time.Duration `default:"1s"    help:"how often a bucket flushes a non-empty batch"`
 	FlushCompression   string        `default:"better" enum:"fastest,default,better,best" help:"zstd level for short-lived flush files (fastest|default|better|best); durable/S3 size is set by compaction, so lower levels trade hot-path CPU for transient file size"`
+	FlushWorkers       int           `default:"0"     help:"flush+compress worker goroutines (0 = max(buckets/2, 2)); raise to scale flush throughput with CPUs independently of bucket count"`
+	FlushQueue         int           `default:"0"     help:"depth of the flush+compress job queues (0 = bucket count); deeper queues absorb ingest bursts before backpressure, at the cost of memory"`
 	CompactInterval    time.Duration `default:"30s"   help:"how often to compact small files into segments (0 disables)"`
 	CompactMinFiles    int           `default:"8"     help:"minimum number of flush files before a compaction pass runs"`
 	Durable            bool          `default:"true"  help:"write-ahead log each payload (fsync) before acknowledging; disable for faster, lossy-on-crash ingest"`
@@ -233,7 +235,12 @@ func (c *ServeCmd) Run() error {
 		return err
 	}
 
-	bucketOpts := []BucketOption{WithFlushInterval(c.FlushInterval), flushCompression}
+	bucketOpts := []BucketOption{
+		WithFlushInterval(c.FlushInterval),
+		flushCompression,
+		WithFlushWorkers(c.FlushWorkers),
+		WithFlushQueue(c.FlushQueue),
+	}
 
 	// Durable acknowledgement requires the payload to reach a segment, so it is
 	// incompatible with dropping on backpressure; durability wins.

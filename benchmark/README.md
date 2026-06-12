@@ -129,9 +129,20 @@ task bench:loadgen TARGET=https://loge-bench.fly.dev RATE=20000 DURATION=30m
 region**, pushing over the private network:
 
 ```sh
-fly deploy --dockerfile Dockerfile.loadgen --build-only --push -a loge-bench   # prints an image ref
-fly machine run <image-ref> -a loge-bench --region iad --vm-cpus 4 -- \
-  --target http://loge-bench.internal:8080 --rate 50000 --workers 16 --duration 30m
+# ⚠️ `fly deploy --dockerfile X --build-only` IGNORES --dockerfile and builds the
+# Dockerfile from fly.toml (the server!). Confirm the image you get is ~6 MB, not ~46 MB.
+# Build the loadgen image by pointing fly.toml's [build] at it, then reverting:
+sed -i.bak 's#dockerfile = "Dockerfile"#dockerfile = "Dockerfile.loadgen"#' fly.toml
+fly deploy --build-only --push -a loge-bench        # prints an image ref; expect "image size: ~6.6 MB"
+mv fly.toml.bak fly.toml                             # revert
+
+# Run it. --entrypoint forces the loadgen binary (belt-and-suspenders vs the wrong image).
+# Target the server's SPECIFIC machine (<id>.vm.<app>.internal), NOT loge-bench.internal —
+# the app-wide name round-robins across every machine, including the loadgen machine itself.
+fly machine run <image-ref> -a loge-bench --region iad --vm-cpu-kind performance --vm-cpus 4 \
+  --entrypoint /usr/local/bin/loge-loadgen -- \
+  --target http://<server-machine-id>.vm.loge-bench.internal:8080 \
+  --rate 50000 --workers 16 --duration 30m
 ```
 
 Watch tiering as it happens:
@@ -197,27 +208,71 @@ fly storage destroy <bucket>       # or keep for re-runs
 
 ## Sample run + findings
 
-A first run on Fly `iad` (one `performance-2x`: 2 CPU / 4 GB, 20 GB volume, public
-Tigris bucket), ~4 min ingest:
+Both runs are on the same hardware — one Fly `iad` `performance-2x` (2 CPU / 4 GB),
+20 GB volume, public Tigris bucket, ~4 min ingest at a 20k-line/s target. "Run 1" is
+the original; "Run 2" is the 2026-06-12 re-run after the query-path rework (drop FTS5
+entirely → sequential LIKE + binary-fuse trigram segment pruning, decode-after-merge-cap).
 
-- **Ingest:** 4.78 M lines @ **~19,900 lines/s, 0 errors** (948 MB on the wire).
-- **Tiering:** 3 of 5 segments rotated to Tigris; local hot tier stayed ~183 MB (the
-  rest is zstd-compressed on Tigris). Cold reads over the public bucket worked with no
-  degradation.
-- **Per-query latency (single VU):** label (unbounded) p95 **84 ms**, hot window p95
-  **55 ms**, cold window over Tigris p95 **74 ms**, keyword bounded to local **130 ms**,
-  keyword against a single Tigris segment **1.2 s**.
+- **Ingest** held steady across the rework: Run 1 **4.78 M lines @ ~19,900 lines/s**
+  (948 MB wire, 0 errors); Run 2 **4.77 M lines @ 19,875 lines/s** (947.5 MB wire, 0
+  errors). The control workload is unchanged, so the query deltas below are apples-to-apples.
+- **Tiering / compression:** segments zstd-compress to ~**4.2×** vs wire JSON (Run 2:
+  947.5 MB wire → 228 MB across 12 Tigris segments; hot tier after full rotation is just
+  the catalog, ~1 MB). Cold reads over the public bucket worked with no degradation.
 
-⚠️ **The one cliff — unbounded FTS keyword search across multiple Tigris segments: ~37 s**
-(vs 1.1 s for an unbounded *label* scan over the same segments). Trigram index lookups
-are many small *random* reads; over HTTP range-GETs that is pathological, whereas
-timestamp-range scans read large contiguous chunks. Takeaways:
+### Per-query latency, single VU (p95) — before → after
 
-- **Always time-bound keyword searches** — the catalog then prunes remote segments and
-  the slow remote-FTS path is avoided (bounded keyword was 130 ms–1.2 s).
-- High query concurrency on a 2-CPU machine was dominated by this scenario; scale CPUs
-  and/or bound queries for real QPS. A worthwhile future optimization is prefetching or
-  caching the FTS index for remote segments (or capping FTS fan-out across them).
+| Scenario | Run 1 (before) | Run 2 (after) |
+|---|---|---|
+| label, unbounded (`{app=…, level=~"err.*"}`) | 84 ms | 85 ms |
+| hot window (recent → local segments) | 55 ms | 73 ms |
+| cold window over Tigris (oldest data) | 74 ms | 75 ms |
+| keyword, bounded to a 5 m window | 130 ms – 1.2 s | **182 ms** |
+| **keyword, UNBOUNDED across Tigris segments** | **~37 s** | **84 ms** |
+
+✅ **The keyword cliff is gone.** Run 1's pathology — unbounded FTS keyword search across
+multiple Tigris segments taking **~37 s** (many small *random* range-GETs into a remote
+trigram index) — is **~84 ms in Run 2 (~440× faster)**, now in the same ballpark as a
+label scan. **FTS5 was dropped entirely** (an SQLite FTS5 trigram index cost ~3.3× the
+segment size yet lost to a plain scan): keyword search is now a sequential `LIKE`, with a
+small serialized **binary-fuse trigram filter** per segment that prunes whole segments a
+keyword can't be in. That turns cold keyword search into large contiguous reads instead of
+many random index lookups over HTTP. Run 2 was
+also *harder* — 10–12 of 12 segments were already on Tigris during the suite (vs 3 of 5 in
+Run 1), so most of these numbers are against an almost-entirely-remote store and still
+sub-100 ms. Time-bounding keyword search is still good hygiene (it prunes remote segments
+outright), but it is no longer load-bearing for correctness of latency.
+
+### Cold-start catalog rebuild (Run 2)
+
+A fresh machine on an **empty volume** rebuilt its catalog purely from the Tigris listing —
+log line `rediscovered remote segments from S3 listing segments=12`, no per-file opens. The
+in-process rebuild finished **< 2 s** after boot (≈ 24 s end-to-end including Fly machine
+provisioning); first cold-window query **1.3 s**, first keyword query **2.5 s** (both warm
+the seekable-zstd frame cache), steady-state thereafter.
+
+### Max-throughput "hammer" (Run 2)
+
+Pushing as hard as the 2-CPU server will go, via an in-region loadgen machine over the
+private 6PN network (so the client/uplink is not the bottleneck):
+
+| Loadgen | Target rate | Achieved | Errors |
+|---|---|---|---|
+| `performance-4x`, 24 workers | 100k lines/s | **92,516 lines/s** (18.4 MB/s) | 0 |
+| `performance-8x`, 48 workers | 400k lines/s | **111,182 lines/s** (22.1 MB/s) | 0 |
+
+**The ceiling for this hardware is ~110k lines/s (~22 MB/s) with zero data loss.** Past
+that, the **flusher applies backpressure** (`flusher backpressure, blocking until flush
+completes`) — it *blocks* ingest rather than dropping, so the effective accept-rate
+plateaus near 110k/s no matter how hard you push (a 4× higher target yielded only ~20%
+more throughput). Every push still returned HTTP 2xx (the generator counts only 2xx as
+success), and no machine restarted/OOM'd. The catalog's `rows_total` *lagged* the accepted
+volume during the burst (the flush→segment→catalog pipeline can't keep pace at 110k/s on
+2 CPUs) and then **drained back up** once load stopped — i.e. the **accept ceiling
+(~110k/s) is higher than the sustainable segment/catalog rate**. For sustained ingest
+well above ~100k lines/s, scale CPUs (flush writes + background compaction/zstd are the
+CPU bottleneck) or run
+multiple machines; the backpressure path guarantees you lose nothing while you do.
 
 ---
 

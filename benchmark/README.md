@@ -362,6 +362,38 @@ throughput ~37% because the remaining work — now dominated by the **SQLite ins
 becomes the ceiling. That's the next lever (batched inserts / lighter compaction), followed
 still by msgpack ingest to shrink decode further.
 
+### Run 5 — attacking the SQLite cost (2026-06-12)
+
+Run 4 left SQLite-via-cgo as the #1 cost (~42%), split between the flush **write** and the
+compaction **merge**. Profiling separated the two and only one had a SQLite-specific win:
+
+- **Compaction merge — the win.** `copyFileInto` copied every source row into Go
+  (`rows.Next`/`Scan`) and re-`Exec`'d it into the segment — two cgo crossings per row, the
+  `SQLiteRows.Next` the profile flagged. Replaced with a SQLite-native merge: **`ATTACH` each
+  source** (a read-only zstd-compressed db, reachable via `file:<abs>?vfs=zstd&immutable=1` —
+  the ATTACH URI resolves the same zstd VFS the reads use) and two **`INSERT...SELECT`s** that
+  offset label ids in SQL, so the whole copy runs in SQLite's C core with no per-row round-trip.
+  Local benchmark (`BenchmarkCompactMerge`, 16×2000 rows): **~305 ms → ~225 ms (−26%)** and
+  **986k → 130k allocs/op (−87%)** — far less GC pressure.
+- **Flush write — already optimal.** The flush insert is b-tree-bound, not crossing-bound:
+  raising the multi-row `INSERT` batch size 8× (`maxBatchInsert` 500→4000, 8× fewer statements)
+  changed nothing (`BenchmarkFlush` ~43 ms either way). Multi-row `INSERT` in a `journal_mode=OFF`
+  transaction is already the fast path; reverted.
+
+**Live (same perf-2x, same 400k hammer as Run 4):**
+
+| | Achieved | `SQLiteRows.Next` (compaction read) |
+|---|---|---|
+| Run 4 | 141,039 lines/s | ~12% |
+| **Run 5** | **146,466 lines/s** (+3.9%) | **~9%** |
+
+The live lift is modest because compaction is a **background** task — its CPU only intermittently
+competes with the continuous foreground flush+decode, so cutting it nudges the ceiling rather
+than moving it like the decode fix did. The local merge numbers are the cleaner measure of the
+change. Profiling also surfaced the next compaction-read hotspot: `buildLineFilter` still scans
+every line in Go to hash trigrams (the remaining ~9%); shrinking that, plus msgpack ingest for
+decode, are the open levers.
+
 ---
 
 ## Files

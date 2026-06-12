@@ -52,6 +52,7 @@ type Buckets struct {
 	compressors        *worker.Worker[compressJob]
 	dropOnBackpressure bool
 	flushInterval      time.Duration
+	flushEncoderPool   *sync.Pool
 	wal                *WAL
 	onDurable          func(filename string, seqs []uint64)
 }
@@ -74,6 +75,38 @@ func WithFlushInterval(interval time.Duration) BucketOption {
 			b.flushInterval = interval
 		}
 	}
+}
+
+// WithFlushCompression overrides the zstd level used to compress short-lived
+// flush files on the latency-sensitive ingest path. Lower levels
+// (SpeedFastest/SpeedDefault) cut compressor-worker CPU under sustained load;
+// the durable on-disk/S3 size is governed by compaction (SpeedBestCompression),
+// which recompresses surviving segments, so the flush-tier level trades hot-path
+// CPU for the size of transient, soon-recompacted files.
+func WithFlushCompression(level zstd.EncoderLevel) BucketOption {
+	return func(b *Buckets) {
+		b.flushEncoderPool = newEncoderPool(level)
+	}
+}
+
+// flushCompressionLevels maps CLI level names to zstd encoder levels for the
+// flush tier, keeping the zstd dependency out of the CLI layer.
+var flushCompressionLevels = map[string]zstd.EncoderLevel{
+	"fastest": zstd.SpeedFastest,
+	"default": zstd.SpeedDefault,
+	"better":  zstd.SpeedBetterCompression,
+	"best":    zstd.SpeedBestCompression,
+}
+
+// WithFlushCompressionName returns a flush-compression BucketOption selected by
+// CLI level name (fastest/default/better/best). An unknown name is an error.
+func WithFlushCompressionName(name string) (BucketOption, error) {
+	level, ok := flushCompressionLevels[name]
+	if !ok {
+		return nil, fmt.Errorf("unknown flush compression %q (want fastest, default, better, or best)", name)
+	}
+
+	return WithFlushCompression(level), nil
 }
 
 // WithWAL makes Append durably log each payload (and assign it a sequence
@@ -171,8 +204,12 @@ func NewBuckets(
 		opt(buckets)
 	}
 
+	if buckets.flushEncoderPool == nil {
+		buckets.flushEncoderPool = betterEncoderPool
+	}
+
 	buckets.compressors = worker.NewWithContext(ctx, size, max(size/2, 2), func(_ int, job compressJob) {
-		if err := compress(job.filename); err != nil {
+		if err := compressWithPool(job.filename, buckets.flushEncoderPool); err != nil {
 			slog.Error("could not compress file", slog.String("filename", job.filename), slog.String("error", err.Error()))
 
 			return

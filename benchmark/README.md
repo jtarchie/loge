@@ -333,6 +333,35 @@ under it (still lossless by design — it blocks, never drops).
 - Throughput scales ~linearly-ish with CPUs, so "add cores" remains the simplest lever for
   raw ingest headroom.
 
+### Run 4 — the decode win (2026-06-12)
+
+The Run 3 profile pointed straight at the request-path JSON decode (~40% of CPU). A
+local decoder bake-off (`jsonbench_test.go`) found goccy/go-json was already the fastest
+library available, but that `bind()` was calling its **streaming** `Decoder` — which is
+~10× slower than `Unmarshal` over a contiguous buffer. The fix (read the body, then
+`json.Unmarshal`) is a couple of lines, no new dependency.
+
+Re-hammered on the **same `performance-2x`** with the same 400k-target hammer:
+
+| | Achieved | Errors |
+|---|---|---|
+| Run 3 (streaming decode) | 102,636 lines/s | 0 |
+| **Run 4 (ReadAll + Unmarshal)** | **141,039 lines/s** (28 MB/s) | 0 |
+
+**+37% ingest throughput on identical hardware**, still zero data loss. The fresh CPU
+profile confirms the mechanism and the shifted bottleneck:
+
+| CPU cost (cumulative) | Run 3 | Run 4 |
+|---|---|---|
+| JSON decode (`loge.bind`) | ~40% | **~14%** |
+| `runtime.memmove` (flat — streaming byte-shuffle) | ~31% | **~2%** |
+| **SQLite via cgo** (flush `INSERT`s + compaction) | ~28% | **~42%** (now #1) |
+
+The gain is sub-proportional to the decode saving (Amdahl): freeing ~26% of CPU lifts
+throughput ~37% because the remaining work — now dominated by the **SQLite insert path** —
+becomes the ceiling. That's the next lever (batched inserts / lighter compaction), followed
+still by msgpack ingest to shrink decode further.
+
 ---
 
 ## Files

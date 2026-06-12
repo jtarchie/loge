@@ -554,13 +554,11 @@ func flusher(payloads []Payload, outputDir string, index int) (string, error) {
 		return "", fmt.Errorf("could not commit transaction %q: %w", filename, err)
 	}
 
-	// Skip VACUUM and FTS5 optimize - they're expensive and we compress immediately anyway
-	// PRAGMA optimize is cheap and helps query planner
-	_, err = client.Exec(`PRAGMA optimize;`)
-	if err != nil {
-		return "", fmt.Errorf("could not optimize %q: %w", filename, err)
-	}
-
+	// No PRAGMA optimize / VACUUM here: a flush segment carries no secondary
+	// indexes (the timestamp index and trigram line filter are built later, in
+	// compaction) and is compressed and discarded immediately, so analyzing the
+	// query planner buys nothing and the optimize cost recurs on every flush —
+	// measurable on the ingest hot path under sustained load.
 	err = client.Close()
 	if err != nil {
 		return "", fmt.Errorf("could not close sqlite: %w", err)

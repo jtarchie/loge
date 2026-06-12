@@ -8,7 +8,10 @@ import (
 	"strconv"
 	"time"
 
+	"encoding/base64"
+
 	"github.com/jtarchie/loge"
+	"github.com/jtarchie/loge/managers"
 	_ "github.com/jtarchie/sqlitezstd"
 	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
@@ -151,6 +154,58 @@ var _ = Describe("Compactor", func() {
 			Expect(got[fmt.Sprintf("line-%d", i)]).To(Equal(fmt.Sprintf("app-%d", i)),
 				"line-%d must still map to app-%d after the offset remap", i, i)
 		}
+	})
+
+	It("builds a correct line filter from the unioned per-flush hashes", func() {
+		// The filter is built by unioning each flush's stored trigram hashes (not by
+		// rescanning lines). Verify it prunes soundly: keywords present in the data
+		// must read as "may contain" (a false negative would drop query results), and
+		// a keyword absent from every line must read as "provably absent".
+		buckets, err := loge.NewBuckets(context.Background(), 1, 1, outputPath, false)
+		Expect(err).NotTo(HaveOccurred())
+
+		const numFiles = 5
+
+		base := int64(1_700_000_000_000_000_000)
+		present := []string{"connection refused", "payment authorized", "checkout"}
+		for i := range numFiles {
+			buckets.Append(makePayload("svc", fmt.Sprintf("%s req-%d via /checkout", present[i%len(present)], i), base+int64(i)))
+		}
+
+		Eventually(func() int {
+			matches, _ := filepath.Glob(filepath.Join(outputPath, "bucket-*.sqlite.zst"))
+
+			return len(matches)
+		}, "5s").Should(Equal(numFiles))
+
+		Expect(buckets.Close()).To(Succeed())
+
+		merged, err := loge.NewCompactor(outputPath, 2, 128, time.Hour).Compact()
+		Expect(err).NotTo(HaveOccurred())
+		Expect(merged).To(Equal(numFiles))
+
+		segments, _ := filepath.Glob(filepath.Join(outputPath, "segment-*.sqlite.zst"))
+		Expect(segments).To(HaveLen(1))
+
+		dbClient, err := sql.Open("sqlite3", segments[0]+"?vfs=zstd")
+		Expect(err).NotTo(HaveOccurred())
+		defer func() { _ = dbClient.Close() }()
+
+		var encoded string
+		Expect(dbClient.QueryRow("SELECT value FROM metadata WHERE key = 'lineFilter'").Scan(&encoded)).To(Succeed())
+		filter, err := base64.StdEncoding.DecodeString(encoded)
+		Expect(err).NotTo(HaveOccurred())
+		Expect(filter).NotTo(BeEmpty(), "a non-empty segment must carry a line filter")
+
+		// Every keyword that appears in the lines must NOT be pruned.
+		for _, kw := range append(present, "/checkout") {
+			Expect(managers.LineFilterMayContain(filter, kw)).To(BeTrue(),
+				"present keyword %q must read as may-contain (no false negative)", kw)
+		}
+
+		// A keyword whose trigrams never appear must be prunable.
+		Expect(managers.LineFilterMayContain(filter, "zqxjwk")).To(BeFalse(),
+			"absent keyword must be provably absent (else the filter prunes nothing)")
 	})
 
 	It("does nothing when there are fewer files than the threshold", func() {

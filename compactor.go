@@ -4,6 +4,7 @@ import (
 	"context"
 	"database/sql"
 	"encoding/base64"
+	"errors"
 	"fmt"
 	"log/slog"
 	"os"
@@ -251,11 +252,17 @@ func (c *Compactor) merge(sources []string) error {
 	// stay unique across files. This replaces a row-by-row Scan/Exec copy — a cgo
 	// crossing each way per row — with two statements per file.
 	labelOffset := int64(0)
+	lineHashes := map[uint64]struct{}{}
+	haveAllHashes := true
 
 	for _, source := range sources {
-		maxOldID, err := copyFileInto(client, source, labelOffset)
+		maxOldID, hadHashes, err := copyFileInto(client, source, labelOffset, lineHashes)
 		if err != nil {
 			return fmt.Errorf("could not merge %q: %w", source, err)
+		}
+
+		if !hadHashes {
+			haveAllHashes = false
 		}
 
 		labelOffset += maxOldID
@@ -277,8 +284,18 @@ func (c *Compactor) merge(sources []string) error {
 	base := filepath.Join(c.dir, managers.FormatSegmentName(minTimestamp, maxTimestamp, sealedAt))
 
 	// Build a trigram filter of the segment's lines so keyword queries can skip
-	// this whole segment (zero file/S3 reads) when it can't contain the term.
-	lineFilter, err := buildLineFilter(client)
+	// this whole segment (zero file/S3 reads) when it can't contain the term. Every
+	// flush stores its trigram-hash set, so the union across sources is exactly what
+	// a full line scan would produce — no per-row read-back. Fall back to scanning
+	// only if some source predates the stored hashes (mixed-version files on disk).
+	var lineFilter []byte
+
+	if haveAllHashes {
+		lineFilter, err = managers.BuildLineFilter(lineHashes)
+	} else {
+		lineFilter, err = buildLineFilter(client)
+	}
+
 	if err != nil {
 		return fmt.Errorf("could not build line filter: %w", err)
 	}
@@ -362,20 +379,22 @@ func (c *Compactor) merge(sources []string) error {
 // per-row round-trip into Go (the old path Scanned and re-Exec'd every row, a cgo
 // crossing each way). Label ids (and the streams that reference them) shift by
 // labelOffset so they stay unique across merged files; it returns this file's max
-// label id so the caller can advance the offset.
-func copyFileInto(db *sql.DB, source string, labelOffset int64) (int64, error) {
+// label id so the caller can advance the offset, and whether the source carried a
+// stored trigram-hash set (unioned into lineHashes so compaction can skip the
+// line scan).
+func copyFileInto(db *sql.DB, source string, labelOffset int64, lineHashes map[uint64]struct{}) (int64, bool, error) {
 	// ATTACH needs an absolute URI (the compactor's CWD is not guaranteed) on the
 	// zstd VFS. immutable=1 marks the source read-only so SQLite never tries to
 	// create a lock/journal sidecar next to the compressed file.
 	abs, err := filepath.Abs(source)
 	if err != nil {
-		return 0, fmt.Errorf("could not resolve source path %q: %w", source, err)
+		return 0, false, fmt.Errorf("could not resolve source path %q: %w", source, err)
 	}
 
 	uri := fmt.Sprintf("file:%s?vfs=zstd&immutable=1", abs)
 
 	if _, err := db.Exec(`ATTACH DATABASE ? AS src`, uri); err != nil {
-		return 0, fmt.Errorf("could not attach source %q: %w", source, err)
+		return 0, false, fmt.Errorf("could not attach source %q: %w", source, err)
 	}
 	defer func() {
 		_, _ = db.Exec(`DETACH DATABASE src`)
@@ -384,20 +403,38 @@ func copyFileInto(db *sql.DB, source string, labelOffset int64) (int64, error) {
 	if _, err := db.Exec(
 		`INSERT INTO labels (id, payload) SELECT id + ?, payload FROM src.labels`, labelOffset,
 	); err != nil {
-		return 0, fmt.Errorf("could not copy labels from %q: %w", source, err)
+		return 0, false, fmt.Errorf("could not copy labels from %q: %w", source, err)
 	}
 
 	if _, err := db.Exec(
 		`INSERT INTO streams (timestamp, line, label_id) SELECT timestamp, line, label_id + ? FROM src.streams`,
 		labelOffset,
 	); err != nil {
-		return 0, fmt.Errorf("could not copy streams from %q: %w", source, err)
+		return 0, false, fmt.Errorf("could not copy streams from %q: %w", source, err)
 	}
 
 	var maxOldID int64
 	if err := db.QueryRow(`SELECT COALESCE(MAX(id), 0) FROM src.labels`).Scan(&maxOldID); err != nil {
-		return 0, fmt.Errorf("could not read max label id from %q: %w", source, err)
+		return 0, false, fmt.Errorf("could not read max label id from %q: %w", source, err)
 	}
 
-	return maxOldID, nil
+	// Union this source's stored trigram hashes so the caller can build the line
+	// filter without scanning lines. Absent (older flush) → signal a scan fallback.
+	var encoded string
+
+	switch err := db.QueryRow(`SELECT value FROM src.metadata WHERE key = 'lineHashes'`).Scan(&encoded); {
+	case errors.Is(err, sql.ErrNoRows):
+		return maxOldID, false, nil
+	case err != nil:
+		return 0, false, fmt.Errorf("could not read line hashes from %q: %w", source, err)
+	}
+
+	packed, err := base64.StdEncoding.DecodeString(encoded)
+	if err != nil {
+		return 0, false, fmt.Errorf("could not decode line hashes from %q: %w", source, err)
+	}
+
+	managers.UnionHashSet(packed, lineHashes)
+
+	return maxOldID, true, nil
 }

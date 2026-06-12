@@ -164,9 +164,31 @@ fly machine destroy $HID -a loge-bench --force
 - `rows_total` will **lag far behind** the lines pushed during the burst (the flush→segment→
   catalog pipeline can't keep 110k/s on 2 CPUs; `/data` balloons to ~1 GB of buffered data).
   This is **catalog lag, not data loss** — confirm by re-sampling `/api/v1/stats` a minute after
-  load stops and watching `rows_total` climb back up. CPU bottleneck is the flush SQLite
-  writes + background compaction (timestamp index, binary-fuse trigram filter, zstd) — note
-  there is **no FTS index** anymore; keyword search is a `LIKE` scan + trigram segment filter.
+  load stops and watching `rows_total` climb back up.
+- **The CPU bottleneck is NOT flush compression** (a pprof, below, proved it): ~40% goes to
+  **JSON-decoding the push body** (`loge.bind` → goccy/go-json, mostly `memmove`) and ~28% to
+  **SQLite inserts/compaction via cgo**; flush-tier zstd is only ~3%. So `--flush-compression`
+  / `--flush-workers` barely move the 2-CPU ceiling — they're enablers once you add CPUs.
+  Throughput is ~linear in cores: perf-8x (8 flush workers) hit **~316k lines/s**, ~3.1× the
+  2-CPU number. The real ingest lever is decode cost (msgpack ingest, or a faster JSON path).
+
+## Phase 6b — capture a CPU profile under the hammer
+
+`--pprof-port` binds **127.0.0.1**, so `fly proxy` can't reach it — capture **on the machine**
+during the hammer (the runtime image has `curl`), then sftp it out. The Fly deploy enables it
+via `PPROF_PORT=6060` in `fly.toml`.
+
+```sh
+# mid-hammer (let backpressure engage ~25s first):
+fly ssh console -a loge-bench --machine $SERVER_ID \
+  -C 'curl -s "http://localhost:6060/debug/pprof/profile?seconds=30" -o /tmp/cpu.pprof'
+fly ssh console -a loge-bench --machine $SERVER_ID \
+  -C 'curl -s "http://localhost:6060/debug/pprof/allocs" -o /tmp/allocs.pprof'
+fly ssh sftp get /tmp/cpu.pprof /tmp/loge-cpu.pprof -a loge-bench   # binary-safe (don't pipe -C stdout)
+go tool pprof -top -cum /tmp/loge-cpu.pprof                         # decode + sqlite dominate
+```
+(Capturing to a machine file + sftp is fine with the permission classifier; `curl -o` is not
+destructive. `du`/`ls` reads are fine too.)
 
 ## Phase 7 — compression metrics
 
@@ -200,3 +222,10 @@ loadgen/server images in the registry are negligible and can be left.
 | remote `rm /data/catalog.*` denied | auto-permission classifier blocks destructive SSH | use `fly machine clone` on empty volume instead |
 | `rows_total` ≪ lines pushed | flush/catalog lag under overload (not loss) | re-sample after load stops; it drains back up |
 | `min_timestamp` flat / no remote segments | rotation age is 2m; not enough time | wait `until segments_remote >= 1` |
+| deploy fails `insufficient resources … with existing volume` | the volume's zone has no capacity for the VM size (volume pins the zone) | destroy the volume, recreate in another region (e.g. `ord`), set `primary_region` to match; CPU-ceiling numbers are region-independent |
+| `fly proxy 6060` to pprof refuses connection | listener is loopback-only (127.0.0.1) | capture on-machine via `fly ssh console -C 'curl localhost:6060/...'` + sftp (Phase 6b) |
+
+**Ingest tuning env (set in `fly.toml [env]`, read by `entrypoint.sh`):** `FLUSH_COMPRESSION`
+(`fastest|default|better|best`), `FLUSH_WORKERS` / `FLUSH_QUEUE` (0 = derive from buckets),
+`PPROF_PORT`. Note from Run 3: these barely move the 2-CPU ceiling (JSON decode + SQLite
+insert dominate, not flush compression) — they pay off once you scale CPUs.

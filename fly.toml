@@ -54,7 +54,7 @@ primary_region = "iad"
   source = "loge_data"
   destination = "/data"
 
-# Compaction + FTS index builds are CPU/RAM bound; size up for ingest throughput.
+# Compaction + zstd recompression are CPU/RAM bound; size up for ingest throughput.
 [[vm]]
   cpu_kind = "performance"
   cpus = 2

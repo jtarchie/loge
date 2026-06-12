@@ -270,9 +270,68 @@ success), and no machine restarted/OOM'd. The catalog's `rows_total` *lagged* th
 volume during the burst (the flush→segment→catalog pipeline can't keep pace at 110k/s on
 2 CPUs) and then **drained back up** once load stopped — i.e. the **accept ceiling
 (~110k/s) is higher than the sustainable segment/catalog rate**. For sustained ingest
-well above ~100k lines/s, scale CPUs (flush writes + background compaction/zstd are the
-CPU bottleneck) or run
-multiple machines; the backpressure path guarantees you lose nothing while you do.
+well above ~100k lines/s, scale CPUs or run multiple machines; the backpressure path
+guarantees you lose nothing while you do. (Run 3 below profiles *which* CPU work is the
+ceiling — it is not the part you would guess.)
+
+### Run 3 — tuning the flush path + a CPU profile (2026-06-12)
+
+The ingest knobs added after Run 2 — `--flush-compression` (flush-tier zstd level),
+`--flush-workers` / `--flush-queue` (flush+compress pool sizing, independent of bucket
+count) — plus a loopback `--pprof-port` are wired through the Fly entrypoint
+(`FLUSH_COMPRESSION` / `FLUSH_WORKERS` / `FLUSH_QUEUE` / `PPROF_PORT` env in `fly.toml`).
+
+**Tuned, same 2-CPU hardware** (`FLUSH_COMPRESSION=fastest`, `FLUSH_WORKERS=4`,
+`FLUSH_QUEUE=16`), hammered at a 400k-line/s target:
+
+| Config | Achieved | Errors |
+|---|---|---|
+| Run 2 defaults (better zstd, 2 flush workers) | 111,182 lines/s | 0 |
+| Run 3 tuned (fastest zstd, 4 flush workers) | 102,636 lines/s | 0 |
+
+**The flush tuning did *not* raise the 2-CPU ceiling** (102k ≈ 111k, within run/region
+noise — Run 3 ran in `ord`, Run 2 in `iad`). A 30-second CPU profile captured mid-hammer
+(`fly ssh console` on the machine → `curl localhost:6060/debug/pprof/profile`, since the
+listener is loopback-only) shows why — the cycles go almost entirely to two places, and
+neither is flush compression:
+
+| CPU cost (cumulative) | Share |
+|---|---|
+| **JSON decode of the push body** (`loge.bind` → goccy/go-json; mostly `runtime.memmove` + string decode) | **~40%** |
+| **SQLite via cgo** — flush `INSERT`s + the compaction merge reading rows back (`cgocall`, `sqlite3_step`) | **~28%** |
+| zstd **flush-tier** compression (`fastest`) | **~3%** |
+| zstd **compaction** recompression (`Best`) | ~9% |
+
+So `--flush-compression` was tuning a ~3% slice, which is why the needle did not move:
+**the real backpressure ceiling on this workload is the request-path JSON decode plus the
+SQLite insert/compaction**, not flush/compress.
+
+**Scaling out the bottleneck** — same tuned config on **`performance-8x` (8 CPU / 16 GB,
+`FLUSH_WORKERS=8`)**, hammered at 600k:
+
+| Server | Achieved | Errors | vs 2-CPU |
+|---|---|---|---|
+| perf-2x (2 CPU) | 102,636 lines/s | 0 | — |
+| perf-8x (8 CPU) | **316,167 lines/s** (62.8 MB/s) | 66 / 75,885 (0.087%) | **~3.1×** |
+
+~3.1× throughput for 4× the CPUs (sub-linear: SQLite's per-DB locking + the cgo boundary +
+GC don't parallelize perfectly), and the **profile keeps the same shape** — JSON decode
+~37%, SQLite insert ~29%, flush-tier zstd still ~3%. The flusher *still* logs blocking
+backpressure even at 8 CPU, and a tiny 0.087% of pushes exceeded the loadgen's 30 s timeout
+under it (still lossless by design — it blocks, never drops).
+
+**Takeaways for where backpressure work actually pays off:**
+- The flush knobs (`--flush-compression` / `--flush-workers` / `--flush-queue`) are
+  *enablers*, not the lever: on 2 CPUs the decode+insert path saturates the cores, so
+  cheaper flush compression just frees cycles decode immediately reclaims. They earn their
+  keep only once you add CPUs (8 flush workers on 8 cores keep flush off the critical path).
+- The highest-leverage real change is **cutting ingest decode cost**: accept msgpack on the
+  push path (loge already decodes it; the realistic loadgen only emits JSON) or optimize the
+  JSON bind path — that ~40% is the single biggest slice and is pure request-path CPU.
+- Next after that is the **SQLite insert/compaction** (~28%): larger batched inserts, or
+  trimming compaction's read-back/recompression cost.
+- Throughput scales ~linearly-ish with CPUs, so "add cores" remains the simplest lever for
+  raw ingest headroom.
 
 ---
 

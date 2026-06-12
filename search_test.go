@@ -8,7 +8,7 @@ import (
 	"path/filepath"
 	"strconv"
 
-	"github.com/imroc/req/v3"
+	"github.com/go-resty/resty/v2"
 	"github.com/jtarchie/loge"
 	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
@@ -30,7 +30,7 @@ var _ = Describe("loge search", func() {
 			"--output-path", outputPath,
 		)
 
-		httpClient := req.C()
+		httpClient := resty.New().SetRetryCount(3)
 		pushURL := fmt.Sprintf("http://localhost:%d/api/v1/push", port)
 		addr := fmt.Sprintf("http://localhost:%d", port)
 
@@ -46,9 +46,9 @@ var _ = Describe("loge search", func() {
 			}
 
 			Eventually(func() int {
-				response, _ := httpClient.R().SetRetryCount(3).SetBodyJsonMarshal(payload).Post(pushURL)
+				response, _ := httpClient.R().SetBody(payload).Post(pushURL)
 
-				return response.StatusCode
+				return response.StatusCode()
 			}).Should(Equal(http.StatusOK))
 		}
 

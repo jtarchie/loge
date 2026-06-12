@@ -12,7 +12,7 @@ import (
 	"time"
 
 	"github.com/alecthomas/kong"
-	"github.com/imroc/req/v3"
+	"github.com/go-resty/resty/v2"
 	"github.com/jaswdr/faker/v2"
 	"github.com/jtarchie/loge"
 	_ "github.com/jtarchie/sqlitezstd"
@@ -59,12 +59,11 @@ var _ = Describe("Running the application", func() {
 
 		payload := generatePayload()
 
-		httpClient := req.C()
+		httpClient := resty.New().SetRetryCount(3)
 
 		Eventually(func() error {
 			_, err := httpClient.R().
-				SetRetryCount(3).
-				SetBodyJsonMarshal(payload).
+				SetBody(payload).
 				Post(fmt.Sprintf("http://localhost:%d/api/v1/push", port))
 
 			return err
@@ -72,11 +71,10 @@ var _ = Describe("Running the application", func() {
 
 		Consistently(func() int {
 			response, _ := httpClient.R().
-				SetRetryCount(3).
-				SetBodyJsonMarshal(payload).
+				SetBody(payload).
 				Post(fmt.Sprintf("http://localhost:%d/api/v1/push", port))
 
-			return response.StatusCode
+			return response.StatusCode()
 		}).Should(Equal(http.StatusOK))
 
 		Eventually(func() int {
@@ -87,8 +85,7 @@ var _ = Describe("Running the application", func() {
 
 		var labelResponse loge.LabelResponse
 		_, err = httpClient.R().
-			SetRetryCount(3).
-			SetSuccessResult(&labelResponse).
+			SetResult(&labelResponse).
 			Get(fmt.Sprintf("http://localhost:%d/api/v1/labels", port))
 
 		Expect(err).NotTo(HaveOccurred())
@@ -114,16 +111,15 @@ var _ = Describe("Running the application", func() {
 			"--output-path", outputPath,
 		)
 
-		httpClient := req.C()
+		httpClient := resty.New().SetRetryCount(3)
 
 		Eventually(func() int {
 			response, _ := httpClient.R().
-				SetRetryCount(3).
-				SetContentType("application/json").
-				SetBodyString(`{"streams":[]}`).
+				SetHeader("Content-Type", "application/json").
+				SetBody(`{"streams":[]}`).
 				Post(fmt.Sprintf("http://localhost:%d/api/v1/push", port))
 
-			return response.StatusCode
+			return response.StatusCode()
 		}).Should(Equal(http.StatusBadRequest))
 	})
 
@@ -147,12 +143,11 @@ var _ = Describe("Running the application", func() {
 		err = msgp.Encode(contents, payload)
 		Expect(err).NotTo(HaveOccurred())
 
-		httpClient := req.C()
+		httpClient := resty.New().SetRetryCount(3)
 
 		Eventually(func() error {
 			_, err := httpClient.R().
-				SetRetryCount(3).
-				SetBodyJsonMarshal(payload).
+				SetBody(payload).
 				Post(fmt.Sprintf("http://localhost:%d/api/v1/push", port))
 
 			return err
@@ -160,12 +155,11 @@ var _ = Describe("Running the application", func() {
 
 		Consistently(func() int {
 			response, _ := httpClient.R().
-				SetRetryCount(3).
-				SetContentType("application/msgpack").
-				SetBodyBytes(contents.Bytes()).
+				SetHeader("Content-Type", "application/msgpack").
+				SetBody(contents.Bytes()).
 				Post(fmt.Sprintf("http://localhost:%d/api/v1/push", port))
 
-			return response.StatusCode
+			return response.StatusCode()
 		}).Should(Equal(http.StatusOK))
 
 		Eventually(func() int {
@@ -176,12 +170,11 @@ var _ = Describe("Running the application", func() {
 
 		var labelResponse loge.LabelResponse
 		response, err := httpClient.R().
-			SetRetryCount(3).
 			SetHeader("Accept", "application/msgpack").
 			Get(fmt.Sprintf("http://localhost:%d/api/v1/labels", port))
 		Expect(err).NotTo(HaveOccurred())
 
-		err = msgp.Decode(response.Body, &labelResponse)
+		err = msgp.Decode(bytes.NewReader(response.Body()), &labelResponse)
 		Expect(err).NotTo(HaveOccurred())
 		Expect(labelResponse.Status).To(Equal("success"))
 
@@ -205,7 +198,7 @@ var _ = Describe("Running the application", func() {
 			"--output-path", outputPath,
 		)
 
-		httpClient := req.C()
+		httpClient := resty.New().SetRetryCount(3)
 		pushURL := fmt.Sprintf("http://localhost:%d/api/v1/push", port)
 		queryURL := fmt.Sprintf("http://localhost:%d/api/v1/query", port)
 
@@ -221,9 +214,9 @@ var _ = Describe("Running the application", func() {
 			}
 
 			Eventually(func() int {
-				response, _ := httpClient.R().SetRetryCount(3).SetBodyJsonMarshal(payload).Post(pushURL)
+				response, _ := httpClient.R().SetBody(payload).Post(pushURL)
 
-				return response.StatusCode
+				return response.StatusCode()
 			}).Should(Equal(http.StatusOK))
 		}
 
@@ -244,10 +237,10 @@ var _ = Describe("Running the application", func() {
 			}
 
 			response, err := httpClient.R().
-				SetBodyJsonMarshal(body).
-				SetSuccessResult(&queryResponse).
+				SetBody(body).
+				SetResult(&queryResponse).
 				Post(queryURL)
-			if err != nil || response.StatusCode != http.StatusOK {
+			if err != nil || response.StatusCode() != http.StatusOK {
 				return -1
 			}
 
@@ -273,7 +266,7 @@ var _ = Describe("Running the application", func() {
 			"--output-path", outputPath,
 		)
 
-		httpClient := req.C()
+		httpClient := resty.New().SetRetryCount(3)
 		pushURL := fmt.Sprintf("http://localhost:%d/api/v1/push", port)
 		queryURL := fmt.Sprintf("http://localhost:%d/api/v1/query", port)
 
@@ -289,9 +282,9 @@ var _ = Describe("Running the application", func() {
 			}
 
 			Eventually(func() int {
-				response, _ := httpClient.R().SetRetryCount(3).SetBodyJsonMarshal(payload).Post(pushURL)
+				response, _ := httpClient.R().SetBody(payload).Post(pushURL)
 
-				return response.StatusCode
+				return response.StatusCode()
 			}).Should(Equal(http.StatusOK))
 		}
 
@@ -310,10 +303,10 @@ var _ = Describe("Running the application", func() {
 		// into matchers + line filter, so it matches the same web row.
 		Eventually(func() int {
 			response, err := httpClient.R().
-				SetBodyJsonMarshal(map[string]any{"query": `{app="web"} |= "index"`}).
-				SetSuccessResult(&queryResponse).
+				SetBody(map[string]any{"query": `{app="web"} |= "index"`}).
+				SetResult(&queryResponse).
 				Post(queryURL)
-			if err != nil || response.StatusCode != http.StatusOK {
+			if err != nil || response.StatusCode() != http.StatusOK {
 				return -1
 			}
 
@@ -325,10 +318,10 @@ var _ = Describe("Running the application", func() {
 
 		// A malformed selector is a 400, not a silently-empty result.
 		badResp, err := httpClient.R().
-			SetBodyJsonMarshal(map[string]any{"query": `{app=}`}).
+			SetBody(map[string]any{"query": `{app=}`}).
 			Post(queryURL)
 		Expect(err).NotTo(HaveOccurred())
-		Expect(badResp.StatusCode).To(Equal(http.StatusBadRequest))
+		Expect(badResp.StatusCode()).To(Equal(http.StatusBadRequest))
 	})
 
 	It("gates read endpoints behind the api key when one is set", func() {
@@ -346,55 +339,55 @@ var _ = Describe("Running the application", func() {
 			"--api-key", "secret",
 		)
 
-		httpClient := req.C()
+		httpClient := resty.New().SetRetryCount(3)
 		base := fmt.Sprintf("http://localhost:%d", port)
 
 		// The server is up once the auth probe answers (401 without a token).
 		Eventually(func() int {
-			response, _ := httpClient.R().SetRetryCount(3).Get(base + "/api/v1/auth")
+			response, _ := httpClient.R().Get(base + "/api/v1/auth")
 
-			return response.StatusCode
+			return response.StatusCode()
 		}).Should(Equal(http.StatusUnauthorized))
 
-		auth := func(r *req.Request) *req.Request { return r.SetHeader("Authorization", "Bearer secret") }
+		auth := func(r *resty.Request) *resty.Request { return r.SetHeader("Authorization", "Bearer secret") }
 
 		// Reads require the token: 401 without, 200 with.
 		for _, path := range []string{"/api/v1/auth", "/api/v1/labels", "/api/v1/stats"} {
 			resp, err := httpClient.R().Get(base + path)
 			Expect(err).NotTo(HaveOccurred())
-			Expect(resp.StatusCode).To(Equal(http.StatusUnauthorized), path+" without key")
+			Expect(resp.StatusCode()).To(Equal(http.StatusUnauthorized), path+" without key")
 
 			resp, err = auth(httpClient.R()).Get(base + path)
 			Expect(err).NotTo(HaveOccurred())
-			Expect(resp.StatusCode).To(Equal(http.StatusOK), path+" with key")
+			Expect(resp.StatusCode()).To(Equal(http.StatusOK), path+" with key")
 		}
 
 		// The auth probe reports that a key is required.
 		var authResp struct {
 			Required bool `json:"required"`
 		}
-		_, err = auth(httpClient.R()).SetSuccessResult(&authResp).Get(base + "/api/v1/auth")
+		_, err = auth(httpClient.R()).SetResult(&authResp).Get(base + "/api/v1/auth")
 		Expect(err).NotTo(HaveOccurred())
 		Expect(authResp.Required).To(BeTrue())
 
 		// Query is gated too.
-		resp, err := httpClient.R().SetBodyString(`{}`).Post(base + "/api/v1/query")
+		resp, err := httpClient.R().SetBody(`{}`).Post(base + "/api/v1/query")
 		Expect(err).NotTo(HaveOccurred())
-		Expect(resp.StatusCode).To(Equal(http.StatusUnauthorized))
+		Expect(resp.StatusCode()).To(Equal(http.StatusUnauthorized))
 
-		resp, err = auth(httpClient.R()).SetBodyString(`{}`).Post(base + "/api/v1/query")
+		resp, err = auth(httpClient.R()).SetBody(`{}`).Post(base + "/api/v1/query")
 		Expect(err).NotTo(HaveOccurred())
-		Expect(resp.StatusCode).To(Equal(http.StatusOK))
+		Expect(resp.StatusCode()).To(Equal(http.StatusOK))
 
 		// Ingest stays open so log shippers don't need the key.
-		resp, err = httpClient.R().SetBodyJsonMarshal(generatePayload()).Post(base + "/api/v1/push")
+		resp, err = httpClient.R().SetBody(generatePayload()).Post(base + "/api/v1/push")
 		Expect(err).NotTo(HaveOccurred())
-		Expect(resp.StatusCode).NotTo(Equal(http.StatusUnauthorized))
+		Expect(resp.StatusCode()).NotTo(Equal(http.StatusUnauthorized))
 
 		// The web UI's static assets stay open so the login page can load.
 		resp, err = httpClient.R().Get(base + "/")
 		Expect(err).NotTo(HaveOccurred())
-		Expect(resp.StatusCode).To(Equal(http.StatusOK))
+		Expect(resp.StatusCode()).To(Equal(http.StatusOK))
 	})
 
 	It("serves the embedded web UI", func() {
@@ -411,10 +404,10 @@ var _ = Describe("Running the application", func() {
 			"--output-path", outputPath,
 		)
 
-		httpClient := req.C()
+		httpClient := resty.New().SetRetryCount(3)
 		base := fmt.Sprintf("http://localhost:%d", port)
 
-		var index *req.Response
+		var index *resty.Response
 		Eventually(func() int {
 			resp, err := httpClient.R().Get(base + "/")
 			if err != nil {
@@ -422,10 +415,10 @@ var _ = Describe("Running the application", func() {
 			}
 			index = resp
 
-			return resp.StatusCode
+			return resp.StatusCode()
 		}).Should(Equal(http.StatusOK))
 
-		Expect(index.GetContentType()).To(ContainSubstring("text/html"))
+		Expect(index.Header().Get("Content-Type")).To(ContainSubstring("text/html"))
 		body := index.String()
 		Expect(body).To(ContainSubstring("<!doctype html"))
 		Expect(body).To(ContainSubstring(`id="app"`))
@@ -434,13 +427,13 @@ var _ = Describe("Running the application", func() {
 		// Bundled assets are served too.
 		js, err := httpClient.R().Get(base + "/assets/app.js")
 		Expect(err).NotTo(HaveOccurred())
-		Expect(js.StatusCode).To(Equal(http.StatusOK))
-		Expect(js.GetContentType()).To(ContainSubstring("javascript"))
+		Expect(js.StatusCode()).To(Equal(http.StatusOK))
+		Expect(js.Header().Get("Content-Type")).To(ContainSubstring("javascript"))
 
 		css, err := httpClient.R().Get(base + "/assets/app.css")
 		Expect(err).NotTo(HaveOccurred())
-		Expect(css.StatusCode).To(Equal(http.StatusOK))
-		Expect(css.GetContentType()).To(ContainSubstring("css"))
+		Expect(css.StatusCode()).To(Equal(http.StatusOK))
+		Expect(css.Header().Get("Content-Type")).To(ContainSubstring("css"))
 	})
 })
 

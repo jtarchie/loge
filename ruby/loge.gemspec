@@ -6,7 +6,7 @@ Gem::Specification.new do |spec|
   spec.name = "loge"
   spec.version = Loge::VERSION
   spec.authors = ["JT Archie"]
-  spec.email = ["jtarchie@fastmail.com"]
+  spec.email = ["jtarchie@gmail.com"]
 
   spec.summary = "Ship Ruby and Rails logs to a loge server"
   spec.description = "An asynchronous, batching logger that pushes log lines to a loge " \
@@ -20,7 +20,7 @@ Gem::Specification.new do |spec|
   spec.metadata["source_code_uri"] = "#{spec.homepage}/tree/main/ruby"
   spec.metadata["rubygems_mfa_required"] = "true"
 
-  spec.files = Dir["lib/**/*.rb"] + %w[README.md]
+  spec.files = Dir["lib/**/*.rb"] + %w[LICENSE README.md]
   spec.require_paths = ["lib"]
 
   # logger is stdlib, but it is a bundled gem since Ruby 4.0 and so must be

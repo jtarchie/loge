@@ -65,8 +65,16 @@ func bind(context *echo.Context, payload interface{}) error {
 			return fmt.Errorf("could not unmarshal msgpack: %w", err)
 		}
 	case strings.Contains(contentType, "application/json"):
-		err := json.NewDecoder(context.Request().Body).Decode(payload)
+		// goccy/go-json's streaming Decoder is ~10x slower than Unmarshal over a
+		// contiguous buffer (a decoder bake-off in jsonbench_test.go measured
+		// 1.47ms vs 0.14ms on a 500-line push body), and a Fly CPU profile showed
+		// this decode is ~40% of ingest CPU. Read the body first, then Unmarshal.
+		body, err := io.ReadAll(context.Request().Body)
 		if err != nil {
+			return fmt.Errorf("could not read json body: %w", err)
+		}
+
+		if err := json.Unmarshal(body, payload); err != nil {
 			return fmt.Errorf("could not unmarshal json: %w", err)
 		}
 	default:

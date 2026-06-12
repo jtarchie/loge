@@ -97,6 +97,62 @@ var _ = Describe("Compactor", func() {
 		Expect(maxTimestamp).To(Equal(base + numFiles - 1))
 	})
 
+	It("preserves the stream→label mapping across merged files", func() {
+		// Each flush file carries a DISTINCT label, so the label-id offset remap
+		// must keep every stream pointing at its own file's label. (The merge test
+		// above reuses one label, which can't catch a cross-file mismatch.)
+		buckets, err := loge.NewBuckets(context.Background(), 1, 1, outputPath, false)
+		Expect(err).NotTo(HaveOccurred())
+
+		const numFiles = 6
+
+		base := int64(1_700_000_000_000_000_000)
+		for i := range numFiles {
+			buckets.Append(makePayload(fmt.Sprintf("app-%d", i), fmt.Sprintf("line-%d", i), base+int64(i)))
+		}
+
+		Eventually(func() int {
+			matches, _ := filepath.Glob(filepath.Join(outputPath, "bucket-*.sqlite.zst"))
+
+			return len(matches)
+		}, "5s").Should(Equal(numFiles))
+
+		Expect(buckets.Close()).To(Succeed())
+
+		compactor := loge.NewCompactor(outputPath, 2, 128, time.Hour)
+		merged, err := compactor.Compact()
+		Expect(err).NotTo(HaveOccurred())
+		Expect(merged).To(Equal(numFiles))
+
+		segments, _ := filepath.Glob(filepath.Join(outputPath, "segment-*.sqlite.zst"))
+		Expect(segments).To(HaveLen(1))
+
+		dbClient, err := sql.Open("sqlite3", segments[0]+"?vfs=zstd")
+		Expect(err).NotTo(HaveOccurred())
+		defer func() { _ = dbClient.Close() }()
+
+		// Join streams back to labels and verify line-i still resolves to app-i.
+		rows, err := dbClient.Query(`
+			SELECT s.line, json_extract(l.payload, '$.app')
+			FROM streams s JOIN labels l ON s.label_id = l.id`)
+		Expect(err).NotTo(HaveOccurred())
+		defer func() { _ = rows.Close() }()
+
+		got := map[string]string{}
+		for rows.Next() {
+			var line, app string
+			Expect(rows.Scan(&line, &app)).To(Succeed())
+			got[line] = app
+		}
+		Expect(rows.Err()).NotTo(HaveOccurred())
+
+		Expect(got).To(HaveLen(numFiles))
+		for i := range numFiles {
+			Expect(got[fmt.Sprintf("line-%d", i)]).To(Equal(fmt.Sprintf("app-%d", i)),
+				"line-%d must still map to app-%d after the offset remap", i, i)
+		}
+	})
+
 	It("does nothing when there are fewer files than the threshold", func() {
 		buckets, err := loge.NewBuckets(context.Background(), 1, 1, outputPath, false)
 		Expect(err).NotTo(HaveOccurred())

@@ -6,7 +6,6 @@ import (
 	"encoding/base64"
 	"fmt"
 	"log/slog"
-	"math"
 	"os"
 	"path/filepath"
 	"sort"
@@ -15,11 +14,16 @@ import (
 	"github.com/jtarchie/loge/managers"
 )
 
-// buildLineFilter scans the segment's lines (in the open transaction) and builds
-// a serialized trigram filter used to skip the whole segment for keyword queries
-// it cannot match.
-func buildLineFilter(tx *sql.Tx) ([]byte, error) {
-	rows, err := tx.Query("SELECT line FROM streams")
+// rowQuerier is the read subset shared by *sql.DB and *sql.Tx, so the filter
+// builders work whether the merge runs in a transaction or on a pinned conn.
+type rowQuerier interface {
+	Query(query string, args ...any) (*sql.Rows, error)
+}
+
+// buildLineFilter scans the segment's lines and builds a serialized trigram
+// filter used to skip the whole segment for keyword queries it cannot match.
+func buildLineFilter(db rowQuerier) ([]byte, error) {
+	rows, err := db.Query("SELECT line FROM streams")
 	if err != nil {
 		return nil, fmt.Errorf("could not read lines for filter: %w", err)
 	}
@@ -46,11 +50,11 @@ func buildLineFilter(tx *sql.Tx) ([]byte, error) {
 	return managers.BuildLineFilter(hashes)
 }
 
-// buildLabelFilter scans the segment's distinct label key=value pairs (in the
-// open transaction) and builds a serialized filter used to skip the whole
-// segment for equality matchers it cannot satisfy.
-func buildLabelFilter(tx *sql.Tx) ([]byte, error) {
-	rows, err := tx.Query(`SELECT DISTINCT je.key, je.value FROM labels, json_each(labels.payload) je`)
+// buildLabelFilter scans the segment's distinct label key=value pairs and builds
+// a serialized filter used to skip the whole segment for equality matchers it
+// cannot satisfy.
+func buildLabelFilter(db rowQuerier) ([]byte, error) {
+	rows, err := db.Query(`SELECT DISTINCT je.key, je.value FROM labels, json_each(labels.payload) je`)
 	if err != nil {
 		return nil, fmt.Errorf("could not read label pairs for filter: %w", err)
 	}
@@ -217,9 +221,17 @@ func (c *Compactor) merge(sources []string) error {
 		_ = client.Close()
 	}()
 
+	// Pin one connection: the merge ATTACHes each source database and runs
+	// INSERT...SELECT against it, and ATTACH is connection-scoped, so every
+	// statement must run on the same connection for the attached db to be visible.
+	client.SetMaxOpenConns(1)
+
 	// The default 4 KiB page size compresses best here: the size harness found
-	// larger pages slightly increase the compressed segment (more b-tree/FTS slack
-	// per page), so we do not override it.
+	// larger pages slightly increase the compressed segment (more b-tree slack
+	// per page), so we do not override it. No wrapping transaction: ATTACH cannot
+	// run inside one, and with journal_mode=OFF each statement's auto-commit is a
+	// cheap no-op. File-level atomicity comes from writing to a .partial temp and
+	// renaming on success, so a transaction is not needed for that either.
 	_, err = client.Exec(`
 		PRAGMA journal_mode = OFF;
 		PRAGMA synchronous = OFF;
@@ -234,37 +246,30 @@ func (c *Compactor) merge(sources []string) error {
 		return fmt.Errorf("could not create segment schema: %w", err)
 	}
 
-	transaction, err := client.Begin()
-	if err != nil {
-		return fmt.Errorf("could not begin segment transaction: %w", err)
-	}
-	defer func() {
-		_ = transaction.Rollback()
-	}()
-
-	minTimestamp := int64(math.MaxInt64)
-	maxTimestamp := int64(math.MinInt64)
-	streamCount := 0
+	// Merge each source entirely inside SQLite: ATTACH the (zstd-compressed,
+	// read-only) source and INSERT...SELECT its rows, offsetting label ids so they
+	// stay unique across files. This replaces a row-by-row Scan/Exec copy — a cgo
+	// crossing each way per row — with two statements per file.
 	labelOffset := int64(0)
 
 	for _, source := range sources {
-		offset, fileMin, fileMax, count, err := copyFileInto(transaction, source, labelOffset)
+		maxOldID, err := copyFileInto(client, source, labelOffset)
 		if err != nil {
 			return fmt.Errorf("could not merge %q: %w", source, err)
 		}
 
-		labelOffset = offset
-		streamCount += count
-
-		if count > 0 {
-			minTimestamp = min(minTimestamp, fileMin)
-			maxTimestamp = max(maxTimestamp, fileMax)
-		}
+		labelOffset += maxOldID
 	}
 
-	if streamCount == 0 {
-		minTimestamp = 0
-		maxTimestamp = 0
+	// Recompute the segment's bounds once over the merged data (no longer tracked
+	// per row during the copy). COALESCE yields 0/0 when no streams were merged,
+	// matching the previous empty-segment behavior.
+	var minTimestamp, maxTimestamp int64
+
+	if err := client.QueryRow(
+		`SELECT COALESCE(min(timestamp), 0), COALESCE(max(timestamp), 0) FROM streams`,
+	).Scan(&minTimestamp, &maxTimestamp); err != nil {
+		return fmt.Errorf("could not compute segment bounds: %w", err)
 	}
 
 	// Name the published segment after its data bounds so queries can prune it
@@ -273,19 +278,19 @@ func (c *Compactor) merge(sources []string) error {
 
 	// Build a trigram filter of the segment's lines so keyword queries can skip
 	// this whole segment (zero file/S3 reads) when it can't contain the term.
-	lineFilter, err := buildLineFilter(transaction)
+	lineFilter, err := buildLineFilter(client)
 	if err != nil {
 		return fmt.Errorf("could not build line filter: %w", err)
 	}
 
 	// Build a filter of the segment's exact label key=value pairs so equality
 	// matchers can skip this whole segment when it holds no matching stream.
-	labelFilter, err := buildLabelFilter(transaction)
+	labelFilter, err := buildLabelFilter(client)
 	if err != nil {
 		return fmt.Errorf("could not build label filter: %w", err)
 	}
 
-	if _, err := transaction.Exec(
+	if _, err := client.Exec(
 		`INSERT INTO metadata (key, value) VALUES ('minTimestamp', ?), ('maxTimestamp', ?), ('lineFilter', ?), ('labelFilter', ?);`,
 		minTimestamp, maxTimestamp,
 		base64.StdEncoding.EncodeToString(lineFilter),
@@ -302,12 +307,8 @@ func (c *Compactor) merge(sources []string) error {
 	// materialize every match then sort); the binary-fuse line filter already
 	// prunes whole segments that cannot contain a keyword. No label_id index
 	// either: the query drives from streams and reaches labels by primary key.
-	if _, err := transaction.Exec(`CREATE INDEX idx_streams_timestamp ON streams(timestamp);`); err != nil {
+	if _, err := client.Exec(`CREATE INDEX idx_streams_timestamp ON streams(timestamp);`); err != nil {
 		return fmt.Errorf("could not build segment index: %w", err)
-	}
-
-	if err := transaction.Commit(); err != nil {
-		return fmt.Errorf("could not commit segment: %w", err)
 	}
 
 	if err := client.Close(); err != nil {
@@ -355,114 +356,48 @@ func (c *Compactor) merge(sources []string) error {
 	return nil
 }
 
-// copyFileInto copies one source file's labels and streams into the segment
-// transaction, offsetting label ids so they do not collide across files. It
-// returns the next label offset, the file's min/max timestamps, and its stream
-// count.
-func copyFileInto(tx *sql.Tx, source string, labelOffset int64) (int64, int64, int64, int, error) {
-	src, err := sql.Open("sqlite3", source+"?vfs=zstd")
+// copyFileInto merges one source file into the open segment connection by
+// ATTACHing the source — a read-only, zstd-compressed SQLite db — and running
+// INSERT...SELECT, so the entire copy happens inside SQLite's C core with no
+// per-row round-trip into Go (the old path Scanned and re-Exec'd every row, a cgo
+// crossing each way). Label ids (and the streams that reference them) shift by
+// labelOffset so they stay unique across merged files; it returns this file's max
+// label id so the caller can advance the offset.
+func copyFileInto(db *sql.DB, source string, labelOffset int64) (int64, error) {
+	// ATTACH needs an absolute URI (the compactor's CWD is not guaranteed) on the
+	// zstd VFS. immutable=1 marks the source read-only so SQLite never tries to
+	// create a lock/journal sidecar next to the compressed file.
+	abs, err := filepath.Abs(source)
 	if err != nil {
-		return labelOffset, 0, 0, 0, fmt.Errorf("could not open source: %w", err)
-	}
-	src.SetMaxOpenConns(1)
-	defer func() {
-		_ = src.Close()
-	}()
-
-	maxOldID, err := copyLabels(tx, src, labelOffset)
-	if err != nil {
-		return labelOffset, 0, 0, 0, err
+		return 0, fmt.Errorf("could not resolve source path %q: %w", source, err)
 	}
 
-	fileMin, fileMax, count, err := copyStreams(tx, src, labelOffset)
-	if err != nil {
-		return labelOffset, 0, 0, 0, err
-	}
+	uri := fmt.Sprintf("file:%s?vfs=zstd&immutable=1", abs)
 
-	return labelOffset + maxOldID, fileMin, fileMax, count, nil
-}
-
-func copyLabels(tx *sql.Tx, src *sql.DB, labelOffset int64) (int64, error) {
-	rows, err := src.Query("SELECT id, payload FROM labels")
-	if err != nil {
-		return 0, fmt.Errorf("could not read labels: %w", err)
+	if _, err := db.Exec(`ATTACH DATABASE ? AS src`, uri); err != nil {
+		return 0, fmt.Errorf("could not attach source %q: %w", source, err)
 	}
 	defer func() {
-		_ = rows.Close()
+		_, _ = db.Exec(`DETACH DATABASE src`)
 	}()
 
-	stmt, err := tx.Prepare("INSERT INTO labels (id, payload) VALUES (?, ?)")
-	if err != nil {
-		return 0, fmt.Errorf("could not prepare label insert: %w", err)
+	if _, err := db.Exec(
+		`INSERT INTO labels (id, payload) SELECT id + ?, payload FROM src.labels`, labelOffset,
+	); err != nil {
+		return 0, fmt.Errorf("could not copy labels from %q: %w", source, err)
 	}
-	defer func() {
-		_ = stmt.Close()
-	}()
+
+	if _, err := db.Exec(
+		`INSERT INTO streams (timestamp, line, label_id) SELECT timestamp, line, label_id + ? FROM src.streams`,
+		labelOffset,
+	); err != nil {
+		return 0, fmt.Errorf("could not copy streams from %q: %w", source, err)
+	}
 
 	var maxOldID int64
-
-	for rows.Next() {
-		var (
-			id      int64
-			payload []byte
-		)
-
-		if err := rows.Scan(&id, &payload); err != nil {
-			return 0, fmt.Errorf("could not scan label: %w", err)
-		}
-
-		if _, err := stmt.Exec(id+labelOffset, payload); err != nil {
-			return 0, fmt.Errorf("could not insert label: %w", err)
-		}
-
-		if id > maxOldID {
-			maxOldID = id
-		}
+	if err := db.QueryRow(`SELECT COALESCE(MAX(id), 0) FROM src.labels`).Scan(&maxOldID); err != nil {
+		return 0, fmt.Errorf("could not read max label id from %q: %w", source, err)
 	}
 
-	return maxOldID, rows.Err()
-}
-
-func copyStreams(tx *sql.Tx, src *sql.DB, labelOffset int64) (int64, int64, int, error) {
-	rows, err := src.Query("SELECT timestamp, line, label_id FROM streams")
-	if err != nil {
-		return 0, 0, 0, fmt.Errorf("could not read streams: %w", err)
-	}
-	defer func() {
-		_ = rows.Close()
-	}()
-
-	stmt, err := tx.Prepare("INSERT INTO streams (timestamp, line, label_id) VALUES (?, ?, ?)")
-	if err != nil {
-		return 0, 0, 0, fmt.Errorf("could not prepare stream insert: %w", err)
-	}
-	defer func() {
-		_ = stmt.Close()
-	}()
-
-	fileMin := int64(math.MaxInt64)
-	fileMax := int64(math.MinInt64)
-	count := 0
-
-	for rows.Next() {
-		var (
-			timestamp int64
-			line      string
-			labelID   int64
-		)
-
-		if err := rows.Scan(&timestamp, &line, &labelID); err != nil {
-			return 0, 0, 0, fmt.Errorf("could not scan stream: %w", err)
-		}
-
-		if _, err := stmt.Exec(timestamp, line, labelID+labelOffset); err != nil {
-			return 0, 0, 0, fmt.Errorf("could not insert stream: %w", err)
-		}
-
-		fileMin = min(fileMin, timestamp)
-		fileMax = max(fileMax, timestamp)
-		count++
-	}
-
-	return fileMin, fileMax, count, rows.Err()
+	return maxOldID, nil
 }

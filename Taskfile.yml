@@ -29,6 +29,12 @@ tasks:
     - proto/*.proto
     generates:
     - proto/*.pb.go
+  ruby:test:
+    desc: Run the Ruby gem test suite (ruby/)
+    dir: ruby
+    cmds:
+    - bundle install --quiet
+    - bundle exec rspec
   default:
     cmds:
     - GOFLAGS='-mod=mod' go generate ./...

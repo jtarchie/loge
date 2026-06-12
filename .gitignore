@@ -205,5 +205,9 @@ dist
 tmp/
 # go-task fingerprint cache
 .task/
+# Ruby gem (ruby/)
+ruby/Gemfile.lock
+ruby/.bundle/
+*.gem
 # captured pprof profiles + benchstat baselines (task profile:*, bench:save)
 profiles/

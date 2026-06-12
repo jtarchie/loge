@@ -106,6 +106,18 @@ and the web UI use.
 When `--api-key` is set, this endpoint (and `/labels`, `/stats`, `/search/plan`)
 requires `Authorization: Bearer <key>`; ingest (`/push`) stays open.
 
+## Client libraries
+
+- **Go** — [`slogloge`](slogloge/) is a `log/slog` handler that ships logs to
+  `/api/v1/push` with batching on a background goroutine. Standard library only;
+  importing it does not pull in the server's dependencies.
+- **Ruby / Rails** — the [`loge` gem](ruby/) is an asynchronous, batching
+  `::Logger` plus a Railtie that broadcasts `Rails.logger` to loge when
+  `config.loge.endpoint` (or `LOGE_ENDPOINT`) is set. Stdlib only.
+
+Both render each record as a JSON line, send the timestamp out-of-band, and
+attach the severity as a `level` stream label.
+
 ## Web UI
 
 The server hosts a small web UI at `/` so you can query logs from a browser when
@@ -198,6 +210,7 @@ credentials come from the standard AWS chain (env / shared config / IAM role).
 
 ```sh
 task test    # ginkgo -tags fts5 -race
+task ruby:test # rspec suite for the Ruby gem (ruby/)
 task bench    # k6 push benchmarks (msgpack/json/protobuf)
 task web     # bundle the web UI (web/ -> webdist/, esbuild)
 task server   # run a local server (rebuilds the web UI first)

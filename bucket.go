@@ -3,7 +3,6 @@ package loge
 import (
 	"context"
 	"database/sql"
-	"encoding/base64"
 	"fmt"
 	"io"
 	"log/slog"
@@ -556,12 +555,6 @@ func flusher(payloads []Payload, outputDir string, index int) (string, error) {
 	labels := make([]labelEntry, 0, totalLabels)
 	streams := make([]streamEntry, 0, totalStreams)
 
-	// The lines are in memory here, so hash their trigrams now and persist the
-	// set: compaction can then union the per-flush sets instead of scanning every
-	// line back out of SQLite to rebuild the trigram filter. The hashes are stable,
-	// so the union equals the set a full scan would produce.
-	lineHashes := map[uint64]struct{}{}
-
 	// Collect all labels and streams for batch insert
 	skippedValues := 0
 	labelID := int64(0)
@@ -585,7 +578,6 @@ func flusher(payloads []Payload, outputDir string, index int) (string, error) {
 					line:      value[1],
 					labelID:   labelID,
 				})
-				managers.AddTrigramHashes(value[1], lineHashes)
 				minTimestamp = min(minTimestamp, timestamp)
 				maxTimestamp = max(maxTimestamp, timestamp)
 			}
@@ -621,14 +613,9 @@ func flusher(payloads []Payload, outputDir string, index int) (string, error) {
 		return "", fmt.Errorf("could not insert streams %q: %w", filename, err)
 	}
 
-	// Insert metadata. 'lineHashes' carries the serialized trigram-hash set (base64,
-	// matching how compacted segments store their filters) so compaction unions it
-	// instead of re-scanning lines.
-	_, err = transaction.Exec(
-		`INSERT INTO metadata (key, value) VALUES ('minTimestamp', ?), ('maxTimestamp', ?), ('lineHashes', ?);`,
-		minTimestamp, maxTimestamp,
-		base64.StdEncoding.EncodeToString(managers.SerializeHashSet(lineHashes)),
-	)
+	// Insert metadata
+	_, err = transaction.Exec(`INSERT INTO metadata (key, value) VALUES ('minTimestamp', ?), ('maxTimestamp', ?);`,
+		minTimestamp, maxTimestamp)
 	if err != nil {
 		return "", fmt.Errorf("could not insert metadata %q: %w", filename, err)
 	}

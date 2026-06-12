@@ -2,7 +2,6 @@ package managers
 
 import (
 	"bytes"
-	"encoding/binary"
 	"fmt"
 
 	"github.com/FastFilter/xorfilter"
@@ -63,31 +62,6 @@ func AddTrigramHashes(line string, set map[uint64]struct{}) {
 // set. Returns nil bytes for an empty set (nothing to prune by).
 func BuildLineFilter(set map[uint64]struct{}) ([]byte, error) {
 	return buildFuse(set)
-}
-
-// SerializeHashSet packs a trigram-hash set as little-endian uint64s (8 bytes
-// each, unordered). A flush stores this so compaction can union the per-file sets
-// instead of re-scanning every line out of SQLite to rebuild the trigram set.
-func SerializeHashSet(set map[uint64]struct{}) []byte {
-	buf := make([]byte, 0, len(set)*8)
-
-	var tmp [8]byte
-	for key := range set {
-		binary.LittleEndian.PutUint64(tmp[:], key)
-		buf = append(buf, tmp[:]...)
-	}
-
-	return buf
-}
-
-// UnionHashSet adds the uint64 hashes packed by SerializeHashSet into set. A
-// trailing partial element (len not a multiple of 8) is ignored. Since the
-// trigram hashes are stable, unioning the per-flush sets yields exactly the set a
-// full scan of the merged lines would produce.
-func UnionHashSet(packed []byte, set map[uint64]struct{}) {
-	for i := 0; i+8 <= len(packed); i += 8 {
-		set[binary.LittleEndian.Uint64(packed[i:i+8])] = struct{}{}
-	}
 }
 
 // buildFuse serializes a binary-fuse filter over a hash set. Returns nil bytes

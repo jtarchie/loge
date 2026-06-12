@@ -9,9 +9,10 @@ import (
 	"github.com/jtarchie/loge/managers"
 )
 
-// minTrigramLen is the shortest line/keyword term the FTS5 trigram index can
-// serve. Shorter terms would force a full LIKE table scan, so the parser
-// rejects them to keep every keyword query index-backed.
+// minTrigramLen is the shortest keyword the per-segment trigram filter can act
+// on: a term under 3 bytes has no trigrams, so no segment could be pruned and
+// every segment would be LIKE-scanned. The parser rejects shorter terms to keep
+// keyword queries prunable.
 const minTrigramLen = 3
 
 // ParseSelector parses a LogQL-style selector into stream-label matchers and an
@@ -21,9 +22,10 @@ const minTrigramLen = 3
 //
 // where op is one of =, !=, =~, !~ (the four stream-label operators), and the
 // optional trailing |= "keyword" is the only supported line filter — a substring
-// served by the FTS5 trigram index. The brace block may be empty ({}) or omitted
+// match (a LIKE scan, with a per-segment binary-fuse trigram filter pruning
+// segments that cannot contain it). The brace block may be empty ({}) or omitted
 // entirely when only a |= filter is given. The keyword must be at least
-// minTrigramLen characters so it can use the trigram index.
+// minTrigramLen characters so the trigram filter applies.
 func ParseSelector(input string) ([]managers.Matcher, string, error) {
 	trimmed := strings.TrimSpace(input)
 	if trimmed == "" {

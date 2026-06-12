@@ -145,9 +145,10 @@ The positional selector has two parts:
   query API; `=~`/`!~` are regex). These filter the JSON stream labels. The
   block may be empty (`{}`) or omitted when only a keyword filter is given.
 - An optional **keyword filter** `|= "term"` — a substring matched against the
-  log line via the trigram (FTS5) index. Only `|=` is supported (regex/negated
-  line filters are not), and `term` must be at least 3 characters so it can use
-  the index.
+  log line with a `LIKE` scan, with a per-segment binary-fuse trigram filter
+  pruning segments that can't contain it. Only `|=` is supported (regex/negated
+  line filters are not), and `term` must be at least 3 characters so the trigram
+  filter applies.
 
 | Flag       | Default                 | Description                                                              |
 | ---------- | ----------------------- | ------------------------------------------------------------------------ |
@@ -209,13 +210,13 @@ credentials come from the standard AWS chain (env / shared config / IAM role).
 ## Development
 
 ```sh
-task test    # ginkgo -tags fts5 -race
+task test    # ginkgo -race
 task ruby:test # rspec suite for the Ruby gem (ruby/)
 task bench    # k6 push benchmarks (msgpack/json/protobuf)
 task web     # bundle the web UI (web/ -> webdist/, esbuild)
 task server   # run a local server (rebuilds the web UI first)
 
-go build -tags fts5 -o loge ./loge/main.go   # build the `loge` binary (serve + search)
+go build -o loge ./loge/main.go   # build the `loge` binary (serve + search)
 ```
 
 The web UI bundle in `webdist/` is committed so `go build`/`go install` work

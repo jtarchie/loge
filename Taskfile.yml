@@ -6,7 +6,7 @@ tasks:
     - deno fmt README.md
     - gofmt -w .
   lint: golangci-lint run --fix --timeout "10m"
-  test: go run github.com/onsi/ginkgo/v2/ginkgo -tags fts5 -cover -race -r
+  test: go run github.com/onsi/ginkgo/v2/ginkgo -cover -race -r
   web:
     desc: Bundle the web UI from web/ into webdist/ (embedded into the binary via go:embed)
     cmds:
@@ -19,8 +19,8 @@ tasks:
     - webdist/assets/*
   server:
     deps: [web]
-    cmd: go run -tags fts5 loge/main.go --port 6500 --payload-size 100000 --buckets 2
-  server-drop: go run -tags fts5 loge/main.go --port 6500 --payload-size 100000 --buckets 2 --drop-on-backpressure
+    cmd: go run loge/main.go --port 6500 --payload-size 100000 --buckets 2
+  server-drop: go run loge/main.go --port 6500 --payload-size 100000 --buckets 2 --drop-on-backpressure
   proto:
     desc: Generate protobuf Go code
     cmds:
@@ -46,8 +46,8 @@ tasks:
     desc: Run benchmarks (starts server, runs k6 tests, then stops server)
     cmds:
     - rm -Rf tmp/
-    - go test -tags fts5 -bench=. -benchmem -run ^$
-    - go build -tags fts5 -o /tmp/loge-bench ./loge/main.go
+    - go test -bench=. -benchmem -run ^$
+    - go build -o /tmp/loge-bench ./loge/main.go
     - |
       # Function to start server and wait for it to be ready
       start_server() {
@@ -131,8 +131,8 @@ tasks:
     desc: Run benchmarks with drop-on-backpressure enabled (faster, may lose data)
     cmds:
     - rm -Rf tmp/
-    - go test -tags fts5 -bench=. -benchmem -run ^$
-    - go build -tags fts5 -o /tmp/loge-bench ./loge/main.go
+    - go test -bench=. -benchmem -run ^$
+    - go build -o /tmp/loge-bench ./loge/main.go
     - |
       # Function to start server with drop-on-backpressure
       start_server() {
@@ -244,18 +244,18 @@ tasks:
     desc: 'Save unit benchmark results as the local baseline for bench:diff (var: COUNT)'
     cmds:
     - mkdir -p profiles/bench
-    - go test -tags fts5 -run '^$' -bench . -benchmem -count {{.COUNT | default 6}} ./... | tee profiles/bench/baseline.txt
+    - go test -run '^$' -bench . -benchmem -count {{.COUNT | default 6}} ./... | tee profiles/bench/baseline.txt
     - go test -C worker -run '^$' -bench . -benchmem -count {{.COUNT | default 6}} ./... | tee -a profiles/bench/baseline.txt
   bench:diff:
     desc: 'Re-run unit benchmarks and compare against the saved baseline with benchstat (var: COUNT)'
     cmds:
-    - go test -tags fts5 -run '^$' -bench . -benchmem -count {{.COUNT | default 6}} ./... | tee profiles/bench/current.txt
+    - go test -run '^$' -bench . -benchmem -count {{.COUNT | default 6}} ./... | tee profiles/bench/current.txt
     - go test -C worker -run '^$' -bench . -benchmem -count {{.COUNT | default 6}} ./... | tee -a profiles/bench/current.txt
     - go run golang.org/x/perf/cmd/benchstat@latest profiles/bench/baseline.txt profiles/bench/current.txt
   profile:ingest:
     desc: 'Capture cpu/heap/allocs/goroutine/mutex/block profiles under loadgen ingest (vars: RATE, DURATION, SECONDS)'
     cmds:
-    - go build -tags fts5 -o /tmp/loge-bench ./loge/main.go
+    - go build -o /tmp/loge-bench ./loge/main.go
     - go build -o /tmp/loge-loadgen ./cmd/loge-loadgen
     - |
       OUT="$(pwd)/profiles/ingest/$(date +%Y%m%d-%H%M%S)"
@@ -307,7 +307,7 @@ tasks:
   profile:query:
     desc: 'Seed data with loadgen, then capture profiles under k6 query load (vars: SEED_RATE, SEED_DURATION, SECONDS)'
     cmds:
-    - go build -tags fts5 -o /tmp/loge-bench ./loge/main.go
+    - go build -o /tmp/loge-bench ./loge/main.go
     - go build -o /tmp/loge-loadgen ./cmd/loge-loadgen
     - |
       OUT="$(pwd)/profiles/query/$(date +%Y%m%d-%H%M%S)"
@@ -374,7 +374,7 @@ tasks:
       mkdir -p "$OUT"
       # -C: DIR is a module/package dir (".", "worker"); one benchmark per run
       # so frames from other benchmarks don't pollute the profile.
-      go test -C {{.DIR | default "."}} -tags fts5 -run '^$' \
+      go test -C {{.DIR | default "."}} -run '^$' \
         -bench '{{.BENCH | default "BenchmarkLocalManager"}}' \
         -benchmem -benchtime {{.BENCHTIME | default "5s"}} \
         -cpuprofile "$OUT/cpu.pprof" -memprofile "$OUT/mem.pprof" -o "$OUT/bench.test" .

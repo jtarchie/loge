@@ -7,8 +7,8 @@ provides querying capabilities within timespans. The project is under active
 development with ongoing measurement and refactoring cycles.
 
 **Type:** Go HTTP server application with JavaScript benchmarking tools
-**Language:** Go 1.24+ (using fts5 tag for full-text search) **Size:** Small
-codebase (~15 Go files, 3 benchmark scripts)
+**Language:** Go 1.24+ **Size:** Small codebase (~15 Go files, 3 benchmark
+scripts)
 
 ## Critical Build Requirements
 
@@ -23,13 +23,19 @@ codebase (~15 Go files, 3 benchmark scripts)
 
 ### SQLite Build Tag
 
-**CRITICAL:** All Go commands MUST include `-tags fts5` to enable full-text
-search support:
+Normal builds, tests, and `go run` need **no special build tags** — go-sqlite3
+is built with CGO (the default here) and that is all loge requires.
+
+The `fts5` tag is only needed for the `sizebench` size/latency harness, which
+builds an FTS5 table purely to measure what full-text search would have cost
+(loge itself retired FTS5 in favor of a `LIKE` scan plus a binary-fuse trigram
+segment filter — see `managers/linefilter.go`). Run that harness with its own
+tags, e.g. `go test -tags "fts5 sqlite_dbstat sizebench" -run SegmentSize .`.
 
 ```bash
-go build -tags fts5 ...
-go test -tags fts5 ...
-go run -tags fts5 ...
+go build ...
+go test ...
+go run ...
 ```
 
 ## Build & Validation Workflow
@@ -79,7 +85,7 @@ Runs: `golangci-lint run --fix --timeout "10m"`
 task test
 ```
 
-Runs: `go run github.com/onsi/ginkgo/v2/ginkgo -tags fts5 -cover -race -r`
+Runs: `go run github.com/onsi/ginkgo/v2/ginkgo -cover -race -r`
 
 - Uses Ginkgo v2 test framework
 - Runs with race detector and coverage
@@ -91,7 +97,7 @@ Runs: `go run github.com/onsi/ginkgo/v2/ginkgo -tags fts5 -cover -race -r`
 **Build Binary:**
 
 ```bash
-go build -tags fts5 -o loge ./loge/main.go
+go build -o loge ./loge/main.go
 ```
 
 **Run Server:**
@@ -99,7 +105,7 @@ go build -tags fts5 -o loge ./loge/main.go
 ```bash
 task server
 # Or manually:
-go run -tags fts5 loge/main.go --port 6500 --payload-size 100000 --buckets 2
+go run loge/main.go --port 6500 --payload-size 100000 --buckets 2
 ```
 
 **Run Benchmarks:**
@@ -187,10 +193,11 @@ Generates msgpack serialization code for:
 
 ## Common Pitfalls & Gotchas
 
-### 1. Missing `-tags fts5`
+### 1. Adding an unneeded `-tags fts5`
 
-**Problem:** Build/test failures or missing full-text search functionality
-**Solution:** Always include `-tags fts5` in all go commands
+**Note:** Normal builds/tests/runs do NOT need `-tags fts5`; loge no longer uses
+FTS5. The tag is only for the `sizebench` size harness (`-tags "fts5
+sqlite_dbstat sizebench"`). Don't add it to ordinary go commands.
 
 ### 2. ld warnings during tests
 
@@ -244,10 +251,10 @@ Before submitting changes:
 ## Quick Reference
 
 **Start developing:** `task` (runs full validation) **Run server locally:**
-`task server` or `go run -tags fts5 loge/main.go --port 3000` **Run specific
-test:** `go run github.com/onsi/ginkgo/v2/ginkgo -tags fts5 -focus="test name"`
+`task server` or `go run loge/main.go --port 3000` **Run specific
+test:** `go run github.com/onsi/ginkgo/v2/ginkgo -focus="test name"`
 **Clean build artifacts:** `rm -rf tmp/` (removes generated SQLite files) **Get
-help:** `go run -tags fts5 loge/main.go --help`
+help:** `go run loge/main.go --help`
 
 ## Trust These Instructions
 

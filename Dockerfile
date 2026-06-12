@@ -1,5 +1,5 @@
-# loge server image. go-sqlite3 + the fts5 build tag require CGO, so the build
-# stage uses a C toolchain and the runtime is glibc-based (not scratch).
+# loge server image. go-sqlite3 requires CGO, so the build stage uses a C
+# toolchain and the runtime is glibc-based (not scratch).
 FROM golang:1.25-bookworm AS build
 
 WORKDIR /src
@@ -9,7 +9,7 @@ WORKDIR /src
 COPY . .
 
 ENV CGO_ENABLED=1
-RUN go build -tags fts5 -o /loge ./loge/main.go
+RUN go build -o /loge ./loge/main.go
 
 FROM debian:bookworm-slim
 

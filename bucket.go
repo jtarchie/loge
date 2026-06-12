@@ -620,10 +620,12 @@ func flusher(payloads []Payload, outputDir string, index int) (string, error) {
 		return "", fmt.Errorf("could not insert metadata %q: %w", filename, err)
 	}
 
-	// The expensive FTS5 (line) index and a timestamp index are built once per
-	// compacted segment (see managers/compactor.go), not per flush: building
+	// The timestamp index and the binary-fuse trigram line filter are built once
+	// per compacted segment (see managers/compactor.go), not per flush: building
 	// them on every tiny file dominated write cost and they were never read on
 	// the ingest hot path. Fresh, uncompacted files are queried with a scan.
+	// (There is no full-text index: FTS5 was retired in favor of a LIKE scan plus
+	// the trigram segment filter — see managers/linefilter.go.)
 
 	err = transaction.Commit()
 	if err != nil {

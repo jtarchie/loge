@@ -32,7 +32,7 @@ Validates the whole loop — ingest → realistic logs → label/keyword/window 
 one terminal, no Fly/Tigris:
 
 ```sh
-go build -tags fts5 -o /tmp/loge ./loge/main.go
+go build -o /tmp/loge ./loge/main.go
 /tmp/loge --port 6500 --buckets 2 --payload-size 200 --compact-interval 3s --output-path /tmp/loge-data &
 
 task bench:loadgen TARGET=http://localhost:6500 DURATION=30s RATE=8000
@@ -280,7 +280,7 @@ multiple machines; the backpressure path guarantees you lose nothing while you d
 
 - `cmd/loge-loadgen/` — realistic, CGO-free Go log generator.
 - `benchmark/query/{label,hot,cold,keyword}.js` — k6 query scenarios.
-- `Dockerfile` / `scripts/entrypoint.sh` — loge server image (CGO + fts5; env → flags).
+- `Dockerfile` / `scripts/entrypoint.sh` — loge server image (CGO; env → flags).
 - `Dockerfile.loadgen` — static loadgen image.
 - `fly.toml` — loge app (volume hot tier, Tigris cold tier, aggressive rotation).
 - `GET /api/v1/stats` — catalog tiering summary used by `cold.js` and `task bench:stats`.

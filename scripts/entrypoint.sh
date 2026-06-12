@@ -14,6 +14,16 @@ set -e
 # Tigris public domain. Override any of the ${VAR:-default} values via fly secrets
 # or [env] in fly.toml.
 
+# Optional loopback pprof listener (off unless PPROF_PORT is set); reach it with
+# `fly ssh console` on the machine (it binds 127.0.0.1, so `fly proxy` cannot).
+PPROF_ARGS=""
+if [ -n "${PPROF_PORT:-}" ]; then
+  PPROF_ARGS="--pprof-port ${PPROF_PORT}"
+fi
+
+# Ingest tuning knobs (defaults preserve prior behavior): FLUSH_COMPRESSION is the
+# flush-tier zstd level, FLUSH_WORKERS/FLUSH_QUEUE size the flush+compress pools
+# independently of bucket count. See benchmark/README.md.
 exec loge \
   --port "${PORT:-8080}" \
   --output-path "${OUTPUT_PATH:-/data}" \
@@ -21,6 +31,10 @@ exec loge \
   --payload-size "${PAYLOAD_SIZE:-100000}" \
   --compact-interval "${COMPACT_INTERVAL:-15s}" \
   --query-concurrency "${QUERY_CONCURRENCY:-16}" \
+  --flush-compression "${FLUSH_COMPRESSION:-better}" \
+  --flush-workers "${FLUSH_WORKERS:-0}" \
+  --flush-queue "${FLUSH_QUEUE:-0}" \
+  ${PPROF_ARGS} \
   --s3-force-path-style \
   --s3-read-url-base "${S3_READ_URL_BASE:-https://${BUCKET_NAME}.t3.tigrisfiles.io}" \
   --s3-acl "${S3_ACL:-public-read}" \

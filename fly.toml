@@ -25,6 +25,14 @@ primary_region = "iad"
   S3_ROTATE_AGE = "2m"
   S3_ROTATE_INTERVAL = "30s"
   COMPACT_INTERVAL = "15s"
+  # Ingest tuning for the hammer benchmark: cheapest flush-tier zstd (flush files
+  # are transient — compaction recompresses survivors at Best), and flush+compress
+  # pools sized above the bucket-derived default to absorb bursts. PPROF_PORT
+  # enables the loopback profiler (reach via `fly ssh console` on the machine).
+  FLUSH_COMPRESSION = "fastest"
+  FLUSH_WORKERS = "4"
+  FLUSH_QUEUE = "16"
+  PPROF_PORT = "6060"
 
 [http_service]
   internal_port = 8080
